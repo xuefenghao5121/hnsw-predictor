@@ -1,4 +1,14 @@
-// benchmark_prefetch.cpp - 阶段三 benchmark: 对比有无预取的性能
+// benchmark_prefetch.cpp - 阶段三 benchmark: 全内存 vs DiskHNSW(无预取) vs DiskHNSW(Markov预取)
+//
+// 用法:
+//   ./benchmark_prefetch <graph> <bfs> <blocks> <route> <data> <query> <gt> <k> <ef> <model_path>
+//
+// 配置:
+//   E0: Full-memory (cache = num_blocks, 全部在 DRAM)
+//   E1: DiskHNSW no prefetch (cache=64)
+//   E2: DiskHNSW + Markov prefetch (cache=64)
+//   E3: DiskHNSW no prefetch (cache=256)
+//   E4: DiskHNSW + Markov prefetch (cache=256)
 #include "common.h"
 #include "block_cache.h"
 #include "disk_hnsw.h"
@@ -13,12 +23,11 @@
 static size_t getRSS_MB() {
     struct rusage ru;
     getrusage(RUSAGE_SELF, &ru);
-    return ru.ru_maxrss / 1024;  // Linux: KB -> MB
+    return ru.ru_maxrss / 1024;
 }
 
 using SearchResult = std::pair<float, uint64_t>;
 
-// 读取 ground truth (每条 k 个 uint64)
 std::vector<std::vector<uint64_t>> read_gt(const std::string& path, size_t n, int k) {
     std::ifstream in(path, std::ios::binary);
     std::vector<std::vector<uint64_t>> gt(n);
@@ -40,11 +49,13 @@ struct BenchmarkResult {
     double qps;
     double cache_hit_rate;
     size_t rss_mb;
-    bool prefetch_enabled;
-    size_t prefetch_requested;
-    size_t prefetch_skipped;
-    size_t prefetch_loaded;
-    size_t prefetch_failed;
+    size_t cache_slots;
+    // prefetch stats
+    bool prefetch_enabled = false;
+    size_t prefetch_requested = 0;
+    size_t prefetch_skipped = 0;
+    size_t prefetch_loaded = 0;
+    size_t prefetch_failed = 0;
 };
 
 BenchmarkResult run_benchmark(
@@ -67,15 +78,18 @@ BenchmarkResult run_benchmark(
     hnsw.resetCacheStats();
     if (prefetch_enabled) hnsw.resetPrefetchStats();
 
-    auto t_start = std::chrono::high_resolution_clock::now();
+    // warm up (10 queries)
+    for (size_t q = 0; q < std::min(10UL, num_queries); q++) {
+        hnsw.searchKnn(&queries[q * dim], k);
+    }
 
+    auto t_start = std::chrono::high_resolution_clock::now();
     for (size_t q = 0; q < num_queries; q++) {
         auto t0 = std::chrono::high_resolution_clock::now();
         results[q] = hnsw.searchKnn(&queries[q * dim], k);
         auto t1 = std::chrono::high_resolution_clock::now();
         latencies[q] = std::chrono::duration<double, std::micro>(t1 - t0).count();
     }
-
     auto t_end = std::chrono::high_resolution_clock::now();
     double total_s = std::chrono::duration<double>(t_end - t_start).count();
 
@@ -94,7 +108,6 @@ BenchmarkResult run_benchmark(
         std::set<uint64_t> gt_set(gt_data[q].begin(), gt_data[q].end());
         std::set<uint64_t> hnsw_set;
         for (const auto& [dist, id] : hnsw_baseline[q]) hnsw_set.insert(id);
-
         for (const auto& [dist, id] : results[q]) {
             if (gt_set.count(id)) correct_gt++;
             if (hnsw_set.count(id)) correct_hnsw++;
@@ -138,10 +151,47 @@ void print_result(const BenchmarkResult& r) {
     }
 }
 
+void print_comparison(const std::vector<BenchmarkResult>& results) {
+    std::cout << "\n\n========== 竞品对比总结 ==========" << std::endl;
+    std::cout << "\n| 配置 | Mean(ms) | P50(ms) | P95(ms) | P99(ms) | QPS | Cache% | RSS(MB) | Recall@HNSW |" << std::endl;
+    std::cout << "|------|----------|---------|---------|---------|-----|--------|---------|-------------|" << std::endl;
+    for (const auto& r : results) {
+        std::cout << "| " << r.config_name
+                  << " | " << r.mean_us / 1000
+                  << " | " << r.p50_us / 1000
+                  << " | " << r.p95_us / 1000
+                  << " | " << r.p99_us / 1000
+                  << " | " << r.qps
+                  << " | " << r.cache_hit_rate
+                  << " | " << r.rss_mb
+                  << " | " << r.recall_hnsw << "% |" << std::endl;
+    }
+
+    // 相对于全内存的比值
+    if (!results.empty()) {
+        auto& base = results[0];  // E0 全内存
+        std::cout << "\n相对全内存(E0)对比:" << std::endl;
+        std::cout << "| 配置 | 延迟倍数 | QPS比 | 内存比 | 内存节省 |" << std::endl;
+        std::cout << "|------|---------|-------|--------|---------|" << std::endl;
+        for (const auto& r : results) {
+            double lat_ratio = r.mean_us / base.mean_us;
+            double qps_ratio = r.qps / base.qps;
+            double mem_ratio = (double)r.rss_mb / base.rss_mb;
+            double mem_saved = 1.0 - mem_ratio;
+            std::cout << "| " << r.config_name
+                      << " | " << lat_ratio << "x"
+                      << " | " << qps_ratio << "x"
+                      << " | " << mem_ratio << "x"
+                      << " | " << (mem_saved * 100) << "% |" << std::endl;
+        }
+    }
+    std::cout << "\n==================================\n" << std::endl;
+}
+
 int main(int argc, char** argv) {
-    if (argc < 12) {
+    if (argc < 11) {
         std::cerr << "Usage: " << argv[0]
-                  << " <graph> <bfs> <blocks> <route> <data> <query> <gt> <k> <ef> <cache_slots> <model_path>"
+                  << " <graph> <bfs> <blocks> <route> <data> <query> <gt> <k> <ef> <model_path>"
                   << std::endl;
         return 1;
     }
@@ -155,53 +205,99 @@ int main(int argc, char** argv) {
     std::string gt_path = argv[7];
     int k = std::atoi(argv[8]);
     int ef = std::atoi(argv[9]);
-    size_t cache_slots = std::atoll(argv[10]);
-    std::string model_path = argv[11];
+    std::string model_path = argv[10];
 
     std::cout << "[1] Loading data..." << std::endl;
     int dim;
     size_t num_base, num_query;
     auto base_data = read_fvecs(data_path, dim, num_base);
     auto query_data = read_fvecs(query_path, dim, num_query);
-    // 限制查询数量，避免耗时过长
     if (num_query > 200) {
         query_data.resize(200 * dim);
         num_query = 200;
     }
     auto gt_data = read_gt(gt_path, num_query, k);
-    std::cout << "  Base: " << num_base << ", Query: " << num_query
-              << ", dim=" << dim << std::endl;
+    std::cout << "  Base: " << num_base << ", Query: " << num_query << ", dim=" << dim << std::endl;
 
-    // ---- E1: 无预取 baseline ----
-    std::cout << "[2] E1: No prefetch (cache=" << cache_slots << ")..." << std::endl;
+    // 先获取 num_blocks 信息
+    // 从 BlockCache 初始化信息中读取
+    // 简单方法: 文件大小 / block_size
+    std::ifstream blocks_file(blocks_path, std::ios::binary | std::ios::ate);
+    size_t blocks_file_size = blocks_file.tellg();
+    blocks_file.close();
+    size_t block_size = 262144;  // 固定值
+    size_t num_blocks = blocks_file_size / block_size;
+    std::cout << "  Blocks: " << num_blocks << " (file=" << blocks_file_size << " bytes)" << std::endl;
+
+    std::vector<BenchmarkResult> all_results;
     std::vector<std::vector<SearchResult>> hnsw_baseline;
+
+    // ---- E0: Full-memory (cache = num_blocks) ----
+    std::cout << "\n[2] E0: Full-memory (cache=" << num_blocks << ")..." << std::endl;
     {
-        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, cache_slots, dim);
+        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, num_blocks, dim);
         hnsw.setEf(ef);
-        // warm up + collect baseline
+        // 收集 baseline 结果
         for (size_t q = 0; q < num_query; q++) {
             hnsw_baseline.push_back(hnsw.searchKnn(&query_data[q * dim], k));
         }
         auto r = run_benchmark(hnsw, query_data, gt_data, hnsw_baseline,
-                               dim, k, "E1: No prefetch", false);
+                               dim, k, "E0: Full-mem", false);
+        r.cache_slots = num_blocks;
         print_result(r);
+        all_results.push_back(r);
     }
 
-    // ---- E2: Markov 预取 ----
-    std::cout << "\n[3] E2: With Markov prefetch (cache=" << cache_slots << ")..." << std::endl;
+    // ---- E1: DiskHNSW no prefetch (cache=64) ----
+    std::cout << "\n[3] E1: No prefetch (cache=64)..." << std::endl;
     {
-        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, cache_slots, dim);
+        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, 64, dim);
+        hnsw.setEf(ef);
+        auto r = run_benchmark(hnsw, query_data, gt_data, hnsw_baseline,
+                               dim, k, "E1: Disk c64", false);
+        r.cache_slots = 64;
+        print_result(r);
+        all_results.push_back(r);
+    }
+
+    // ---- E2: DiskHNSW + Markov prefetch (cache=64) ----
+    std::cout << "\n[4] E2: Markov prefetch (cache=64)..." << std::endl;
+    {
+        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, 64, dim);
         hnsw.setEf(ef);
         hnsw.enablePrefetch(model_path);
-        // warm up
-        for (size_t q = 0; q < std::min(10UL, num_query); q++) {
-            hnsw.searchKnn(&query_data[q * dim], k);
-        }
         auto r = run_benchmark(hnsw, query_data, gt_data, hnsw_baseline,
-                               dim, k, "E2: Markov prefetch", true);
+                               dim, k, "E2: Disk c64+pf", true);
+        r.cache_slots = 64;
         print_result(r);
+        all_results.push_back(r);
     }
 
-    std::cout << "\n=== Benchmark complete ===" << std::endl;
+    // ---- E3: DiskHNSW no prefetch (cache=256) ----
+    std::cout << "\n[5] E3: No prefetch (cache=256)..." << std::endl;
+    {
+        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, 256, dim);
+        hnsw.setEf(ef);
+        auto r = run_benchmark(hnsw, query_data, gt_data, hnsw_baseline,
+                               dim, k, "E3: Disk c256", false);
+        r.cache_slots = 256;
+        print_result(r);
+        all_results.push_back(r);
+    }
+
+    // ---- E4: DiskHNSW + Markov prefetch (cache=256) ----
+    std::cout << "\n[6] E4: Markov prefetch (cache=256)..." << std::endl;
+    {
+        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, 256, dim);
+        hnsw.setEf(ef);
+        hnsw.enablePrefetch(model_path);
+        auto r = run_benchmark(hnsw, query_data, gt_data, hnsw_baseline,
+                               dim, k, "E4: Disk c256+pf", true);
+        r.cache_slots = 256;
+        print_result(r);
+        all_results.push_back(r);
+    }
+
+    print_comparison(all_results);
     return 0;
 }
