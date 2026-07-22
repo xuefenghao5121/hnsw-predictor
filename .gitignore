@@ -11,6 +11,7 @@ output/
 logs/error_*.log
 logs/benchmark_1m_run.log
 logs/benchmark_1m_partial.json
+logs/traces_*.txt
 
 # hnswlib is a submodule/external dependency
 hnswlib/
