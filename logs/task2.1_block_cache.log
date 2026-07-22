@@ -1,0 +1,91 @@
+# Task 2.1 执行日志：BlockCache 管理器实现
+
+> 日期：2026-07-22
+> 执行者：hnswpreder (subagent)
+> 耗时：约 30 分钟
+
+## 1. 任务概述
+
+实现 BlockCache 管理器，负责管理 DRAM 中的热块缓存。提供从磁盘按需加载 Block、LRU 淘汰、内存格式展开和线程安全访问能力。
+
+## 2. 产出文件
+
+| 文件 | 路径 | 说明 |
+|------|------|------|
+| 设计文档 | `hnsw-research/phase2-design.md` | BlockCache 类接口设计、内存展开格式、LRU 方案、线程安全方案 |
+| 头文件 | `src/block_cache.h` | CachedBlock 结构体 + BlockCache 类定义 |
+| 实现 | `src/block_cache.cpp` | BlockCache 完整实现 |
+| 单元测试 | `src/test_block_cache.cpp` | 6 个测试用例 |
+| 编译产物 | `build/test_block_cache` | 测试可执行文件 |
+
+## 3. 实现详情
+
+### 3.1 数据结构
+
+- **CachedBlock**: 内存中展开的 Block，包含原始数据 `raw_data` 和解析后的节点索引 `nodes` + `node_id_to_local` 反向映射
+- **CachedNode**: 单个节点的展开信息（node_id, vector 指针, neighbor_count, neighbors 指针）
+- **BlockCache**: 管理缓存槽位、LRU 链表、路由表、磁盘 fd
+
+### 3.2 LRU 实现
+
+经典 `std::list<uint32_t>` + `std::unordered_map` 方案：
+- list 前端 = 最近使用，后端 = 最久未使用
+- map 提供 O(1) 查找
+- splice 操作实现 O(1) 移动到前端
+
+### 3.3 磁盘 I/O
+
+当前阶段使用普通 `pread`（非 O_DIRECT），保证功能正确性。后续优化阶段替换为 O_DIRECT 以减少 page cache 开销。
+
+文件偏移计算：`sizeof(BlocksFileHeader) + block_id * block_size`
+
+### 3.4 线程安全
+
+使用 `std::mutex` 粗粒度锁保护所有缓存操作。路由表构造后只读，理论上不需要锁（后续优化）。
+
+### 3.5 Block 解析
+
+`parseBlock()` 从 raw_data 中解析 BlockHeader、NodeIDs、Vectors、AdjacencyLists，设置 CachedNode 的指针指向 raw_data 内部，避免二次拷贝。
+
+## 4. 测试结果
+
+### 4.1 单元测试（1K 数据集）
+
+```
+========================================
+Results: 6/6 passed
+ALL TESTS PASSED ✅
+========================================
+```
+
+测试用例：
+1. ✅ Basic Loading - BlockCache 构造和初始化验证
+2. ✅ Cache Hit/Miss - 第一次 miss、第二次 hit
+3. ✅ LRU Eviction - cache_slots=1 时正确淘汰
+4. ✅ Data Correctness - 1000 个节点的向量和邻居列表与原始 graph.bin 完全一致
+5. ✅ Stats and Prefetch - 统计信息和预取接口
+6. ✅ All Blocks Accessible - 所有 Block 都可访问
+
+### 4.2 1M 数据集 Smoke Test
+
+```
+Init time: 6 ms (加载路由表)
+100 不同 Block 访问: 50 ms (50% 命中率，因为每个节点访问两次)
+数据正确性 (10 节点): PASS
+LRU 淘汰: 正常工作 (36 次淘汰)
+```
+
+## 5. 关键设计决策
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| I/O 方式 | 普通 pread | O_DIRECT 对偏移量有 512 对齐要求，文件头 16B 不对齐。后续阶段再优化 |
+| 锁粒度 | 单 mutex | 实现简单，阶段二单线程验证够用 |
+| 内存展开 | 指针指向 raw_data | 避免二次拷贝，加载快 |
+| LRU | list + unordered_map | 经典 O(1) 方案 |
+
+## 6. 后续衔接
+
+- **Task 2.2**: 修改 hnswlib 的 `searchLayer`，将 `getNodePtr(id)` 替换为 `BlockCache::getNodeVector(id)` 和 `BlockCache::getNodeNeighbors(id)`
+- **Task 2.3**: 本阶段已实现 LRU，Task 2.3 可直接使用
+- **Phase 3**: 将 pread 替换为 io_uring 异步 I/O，加入预测器驱动的预取

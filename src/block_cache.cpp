@@ -1,0 +1,437 @@
+// block_cache.cpp - BlockCache 管理器实现
+//
+// 实现要点：
+// 1. 使用 pread 从 blocks.bin 按需加载 Block
+// 2. 可插拔替换策略（通过 ReplacementPolicy 接口）
+// 3. 可插拔布局编排器（通过 LayoutProvider 接口）
+// 4. Block 磁盘格式解析为内存可访问的 CachedBlock
+// 5. std::mutex 保证线程安全
+// 6. 支持 O_DIRECT / posix_fadvise / 模拟延迟
+//
+// 设计文档: hnsw-research/phase2-design.md
+
+#include "block_cache.h"
+
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
+#include <stdexcept>
+#include <iostream>
+#include <thread>
+#include <chrono>
+
+// ============================================================
+// 构造与析构
+// ============================================================
+
+// 新构造函数（可插拔接口）
+BlockCache::BlockCache(const std::string& blocks_path,
+                       std::unique_ptr<LayoutProvider> layout,
+                       std::unique_ptr<ReplacementPolicy> policy,
+                       size_t cache_slots,
+                       uint32_t dim,
+                       IOConfig io_config)
+    : blocks_fd_(-1)
+    , block_size_(0)
+    , num_blocks_(0)
+    , layout_(std::move(layout))
+    , layout_name_(layout_ ? layout_->name() : "none")
+    , policy_(std::move(policy))
+    , policy_name_(policy_ ? policy_->name() : "none")
+    , io_config_(io_config)
+    , cache_slots_(cache_slots)
+    , dim_(dim)
+{
+    // ---- 1. 打开 blocks.bin ----
+    int open_flags = O_RDONLY;
+    if (io_config_.use_odirect) {
+#ifdef O_DIRECT
+        open_flags |= O_DIRECT;
+#else
+        std::cerr << "[BlockCache] Warning: O_DIRECT not supported on this platform, falling back to normal I/O"
+                  << std::endl;
+        io_config_.use_odirect = false;
+#endif
+    }
+
+    blocks_fd_ = open(blocks_path.c_str(), open_flags);
+    if (blocks_fd_ < 0) {
+        throw std::runtime_error("BlockCache: Cannot open blocks file: " + blocks_path +
+                                 " - " + std::strerror(errno));
+    }
+
+    BlocksFileHeader fhdr;
+    ssize_t ret = pread(blocks_fd_, &fhdr, sizeof(BlocksFileHeader), 0);
+    if (ret != sizeof(BlocksFileHeader)) {
+        close(blocks_fd_);
+        throw std::runtime_error("BlockCache: Failed to read blocks file header");
+    }
+
+    if (fhdr.magic != MAGIC_BLOCKS) {
+        close(blocks_fd_);
+        throw std::runtime_error("BlockCache: Invalid blocks file magic");
+    }
+
+    block_size_ = fhdr.block_size;
+    num_blocks_ = fhdr.num_blocks;
+
+    // 初始化 O_DIRECT 对齐缓冲区
+    if (io_config_.use_odirect) {
+        initAlignedBuffer();
+    }
+
+    std::cout << "[BlockCache] Initialized: block_size=" << block_size_
+              << ", num_blocks=" << num_blocks_
+              << ", cache_slots=" << cache_slots_
+              << ", dim=" << dim_
+              << ", layout=" << layout_name_
+              << ", policy=" << policy_name_
+              << ", io_mode=" << io_config_.modeName() << std::endl;
+
+    // ---- 2. 验证布局编排器 ----
+    if (!layout_) {
+        close(blocks_fd_);
+        throw std::runtime_error("BlockCache: LayoutProvider is null");
+    }
+
+    if (layout_->getNumBlocks() != num_blocks_ && layout_->getNumBlocks() != 0) {
+        std::cerr << "[BlockCache] Warning: Layout blocks (" << layout_->getNumBlocks()
+                  << ") != file blocks (" << num_blocks_ << ")" << std::endl;
+    }
+}
+
+// 向后兼容构造函数
+BlockCache::BlockCache(const std::string& blocks_path,
+                       const std::string& route_path,
+                       size_t cache_slots,
+                       uint32_t dim,
+                       IOConfig io_config)
+    : BlockCache(blocks_path,
+                 std::make_unique<BfsLayoutProvider>(route_path),
+                 std::make_unique<LRUPolicy>(),
+                 cache_slots,
+                 dim,
+                 io_config)
+{
+    // 读取 blocks.bin 头获取 num_blocks，传给 layout（已在主构造函数中处理）
+    // BfsLayoutProvider 自己会从 route_table.bin 读取
+    // 这里补充 expected_num_blocks
+    // 由于主构造函数已经执行，我们需要在 route_path 构造时传入 expected_num_blocks
+    // 但 BfsLayoutProvider 构造时 num_blocks 未知，所以它在内部推导
+    // 这没问题，功能正确
+}
+
+BlockCache::~BlockCache() {
+    if (blocks_fd_ >= 0) {
+        close(blocks_fd_);
+    }
+    if (aligned_buffer_) {
+        free(aligned_buffer_);
+    }
+}
+
+// ============================================================
+// I/O 辅助方法
+// ============================================================
+
+void BlockCache::initAlignedBuffer() {
+    // O_DIRECT 需要页对齐缓冲区
+    aligned_buffer_size_ = block_size_;
+    int ret = posix_memalign(&aligned_buffer_, 4096, aligned_buffer_size_);
+    if (ret != 0) {
+        aligned_buffer_ = nullptr;
+        std::cerr << "[BlockCache] Warning: posix_memalign failed, falling back to normal I/O"
+                  << std::endl;
+        io_config_.use_odirect = false;
+    }
+}
+
+void BlockCache::simulateLatency() {
+    if (io_config_.simulated_latency_us > 0) {
+        auto us = std::chrono::microseconds(
+            static_cast<int64_t>(io_config_.simulated_latency_us));
+        std::this_thread::sleep_for(us);
+    }
+}
+
+// ============================================================
+// 磁盘加载
+// ============================================================
+
+CachedBlock BlockCache::loadBlockFromDisk(uint32_t block_id) {
+    // 模拟磁盘延迟（在读取之前）
+    simulateLatency();
+
+    // 计算文件偏移量
+    off_t offset = sizeof(BlocksFileHeader) + (off_t)block_id * block_size_;
+
+    // 分配原始数据缓冲区
+    CachedBlock block;
+    block.block_id = block_id;
+    block.dim = dim_;
+    block.raw_data.resize(block_size_);
+
+    if (io_config_.use_odirect && aligned_buffer_) {
+        // 使用 O_DIRECT 对齐缓冲区读取
+        ssize_t ret = pread(blocks_fd_, aligned_buffer_, block_size_, offset);
+        if (ret != (ssize_t)block_size_) {
+            throw std::runtime_error("BlockCache: pread (O_DIRECT) failed for block " +
+                                     std::to_string(block_id) +
+                                     " - " + std::strerror(errno));
+        }
+        // 从对齐缓冲区拷贝到 raw_data
+        std::memcpy(block.raw_data.data(), aligned_buffer_, block_size_);
+    } else {
+        // 普通 pread
+        ssize_t ret = pread(blocks_fd_, block.raw_data.data(), block_size_, offset);
+        if (ret != (ssize_t)block_size_) {
+            throw std::runtime_error("BlockCache: pread failed for block " +
+                                     std::to_string(block_id) +
+                                     " - " + std::strerror(errno));
+        }
+    }
+
+    stats_.disk_reads++;
+
+    // 清除 page cache（模拟真实磁盘场景）
+    if (io_config_.drop_page_cache) {
+        posix_fadvise(blocks_fd_, offset, block_size_, POSIX_FADV_DONTNEED);
+    }
+
+    // 解析 Block 数据
+    parseBlock(block);
+
+    return block;
+}
+
+void BlockCache::parseBlock(CachedBlock& block) {
+    const uint8_t* base = block.raw_data.data();
+
+    // 读取 BlockHeader
+    BlockHeader bh;
+    std::memcpy(&bh, base, sizeof(BlockHeader));
+
+    block.node_count = bh.node_count;
+
+    // 验证偏移量合理性
+    if (bh.data_offset == 0 || bh.adj_offset == 0 ||
+        bh.data_offset > block_size_ || bh.adj_offset > block_size_) {
+        bh.data_offset = sizeof(BlockHeader) + bh.node_count * sizeof(uint32_t);
+        bh.adj_offset = bh.data_offset + bh.node_count * dim_ * sizeof(float);
+    }
+
+    // ---- 解析 Node IDs ----
+    const uint32_t* node_ids = reinterpret_cast<const uint32_t*>(
+        base + sizeof(BlockHeader));
+
+    // ---- 解析 Vectors ----
+    const float* vectors = reinterpret_cast<const float*>(
+        base + bh.data_offset);
+
+    // ---- 解析 Adjacency Lists ----
+    const uint8_t* adj_ptr = base + bh.adj_offset;
+    const uint8_t* adj_end = base + block_size_;
+
+    // ---- 构建展开后的节点索引 ----
+    block.nodes.resize(block.node_count);
+    block.node_id_to_local.reserve(block.node_count);
+
+    for (uint32_t i = 0; i < block.node_count; i++) {
+        CachedNode& node = block.nodes[i];
+
+        node.node_id = node_ids[i];
+        node.vector = vectors + (size_t)i * dim_;
+
+        if (adj_ptr + sizeof(uint16_t) > adj_end) {
+            node.neighbor_count = 0;
+            node.neighbors = nullptr;
+        } else {
+            uint16_t cnt;
+            std::memcpy(&cnt, adj_ptr, sizeof(uint16_t));
+            adj_ptr += sizeof(uint16_t);
+
+            node.neighbor_count = cnt;
+            node.neighbors = reinterpret_cast<const uint32_t*>(adj_ptr);
+            adj_ptr += cnt * sizeof(uint32_t);
+        }
+
+        block.node_id_to_local[node.node_id] = i;
+    }
+}
+
+// ============================================================
+// 替换策略操作
+// ============================================================
+
+bool BlockCache::evictOne() {
+    // 通过替换策略选择 victim
+    uint32_t victim = policy_->selectVictim();
+    if (victim == UINT32_MAX) {
+        return false;
+    }
+
+    // 从缓存中移除
+    cache_map_.erase(victim);
+    policy_->onRemove(victim);
+
+    stats_.evictions++;
+
+    return true;
+}
+
+// ============================================================
+// 节点级访问接口
+// ============================================================
+
+const float* BlockCache::getNodeVector(uint32_t node_id) {
+    CachedBlock* block = getBlockByNodeId(node_id);
+    if (!block) return nullptr;
+
+    return block->getVector(node_id);
+}
+
+const uint32_t* BlockCache::getNodeNeighbors(uint32_t node_id, uint32_t& out_count) {
+    CachedBlock* block = getBlockByNodeId(node_id);
+    if (!block) return nullptr;
+
+    return block->getNeighbors(node_id, out_count);
+}
+
+// ============================================================
+// Block 级访问接口
+// ============================================================
+
+CachedBlock* BlockCache::getBlockByNodeId(uint32_t node_id) {
+    stats_.total_accesses++;
+
+    // 通过布局编排器查 Block ID
+    uint32_t block_id = layout_->getBlockId(node_id);
+    if (block_id == UINT32_MAX) {
+        return nullptr;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 查缓存
+    auto it = cache_map_.find(block_id);
+    if (it != cache_map_.end()) {
+        // 缓存命中
+        stats_.cache_hits++;
+        policy_->onAccess(block_id);
+        return &it->second;
+    }
+
+    // 缓存未命中
+    stats_.cache_misses++;
+
+    // 如果缓存已满，淘汰
+    while (cache_map_.size() >= cache_slots_) {
+        if (!evictOne()) break;
+    }
+
+    // 从磁盘加载
+    try {
+        CachedBlock block = loadBlockFromDisk(block_id);
+
+        // 插入缓存
+        auto result = cache_map_.emplace(block_id, std::move(block));
+        policy_->onInsert(block_id);
+        return &result.first->second;
+    } catch (const std::exception& e) {
+        std::cerr << "[BlockCache] ERROR: " << e.what() << std::endl;
+        return nullptr;
+    }
+}
+
+CachedBlock* BlockCache::getBlockById(uint32_t block_id) {
+    if (block_id >= num_blocks_) return nullptr;
+
+    stats_.total_accesses++;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 查缓存
+    auto it = cache_map_.find(block_id);
+    if (it != cache_map_.end()) {
+        stats_.cache_hits++;
+        policy_->onAccess(block_id);
+        return &it->second;
+    }
+
+    stats_.cache_misses++;
+
+    while (cache_map_.size() >= cache_slots_) {
+        if (!evictOne()) break;
+    }
+
+    try {
+        CachedBlock block = loadBlockFromDisk(block_id);
+        auto result = cache_map_.emplace(block_id, std::move(block));
+        policy_->onInsert(block_id);
+        return &result.first->second;
+    } catch (const std::exception& e) {
+        std::cerr << "[BlockCache] ERROR: " << e.what() << std::endl;
+        return nullptr;
+    }
+}
+
+bool BlockCache::prefetchBlock(uint32_t block_id) {
+    if (block_id >= num_blocks_) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 如果已在缓存中，无需预取
+    if (cache_map_.find(block_id) != cache_map_.end()) {
+        return true;
+    }
+
+    // 如果缓存已满，淘汰
+    while (cache_map_.size() >= cache_slots_) {
+        if (!evictOne()) break;
+    }
+
+    try {
+        CachedBlock block = loadBlockFromDisk(block_id);
+        cache_map_.emplace(block_id, std::move(block));
+        policy_->onInsert(block_id);
+        return true;
+    } catch (const std::exception& e) {
+        std::cerr << "[BlockCache] prefetch ERROR: " << e.what() << std::endl;
+        return false;
+    }
+}
+
+// ============================================================
+// 路由查询
+// ============================================================
+
+uint32_t BlockCache::getBlockId(uint32_t node_id) const {
+    return layout_->getBlockId(node_id);
+}
+
+uint32_t BlockCache::getNumNodes() const {
+    return layout_ ? layout_->getNumNodes() : 0;
+}
+
+// ============================================================
+// 统计信息
+// ============================================================
+
+void BlockCache::resetStats() {
+    stats_.total_accesses = 0;
+    stats_.cache_hits = 0;
+    stats_.cache_misses = 0;
+    stats_.evictions = 0;
+    stats_.disk_reads = 0;
+}
+
+double BlockCache::hitRate() const {
+    size_t total = stats_.total_accesses.load();
+    if (total == 0) return 0.0;
+    return (double)stats_.cache_hits.load() / total;
+}
+
+size_t BlockCache::getNumCachedBlocks() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_map_.size();
+}

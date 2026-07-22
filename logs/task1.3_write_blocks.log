@@ -1,0 +1,90 @@
+# Task: 1.3 Write Blocks to Disk
+# 开始时间: 2026-07-22 16:36:08 (GMT+3)
+# 命令: ./build/write_blocks output/test1m_graph.bin output/test1m_bfs.bin output/test1m_blocks.bin 262144
+# Block大小: 256KB (262144 bytes)
+
+--- 命令输出 ---
+=== Task 1.3: Write Blocks ===
+  Loaded graph structure from output/test1m_graph.bin (1000000 nodes)
+Loading BFS order from output/test1m_bfs.bin...
+  Block size: 262144 bytes (256KB)
+  Total blocks: 2225
+  Avg nodes per block: 449.438
+  Avg fill rate: 99.8833%
+  Min nodes/block: 413, Max nodes/block: 491
+
+Writing blocks to output/test1m_blocks.bin...
+  Written block 100/2225
+  Written block 200/2225
+  Written block 300/2225
+  Written block 400/2225
+  Written block 500/2225
+  Written block 600/2225
+  Written block 700/2225
+  Written block 800/2225
+  Written block 900/2225
+  Written block 1000/2225
+  Written block 1100/2225
+  Written block 1200/2225
+  Written block 1300/2225
+  Written block 1400/2225
+  Written block 1500/2225
+  Written block 1600/2225
+  Written block 1700/2225
+  Written block 1800/2225
+  Written block 1900/2225
+  Written block 2000/2225
+  Written block 2100/2225
+  Written block 2200/2225
+  Written block 2225/2225
+
+=== Block Writing Statistics ===
+  Total blocks: 2225
+  Total file size: 583270416 bytes (556 MB)
+  Metadata saved to output/test1m_blocks.bin.meta
+Task 1.3 complete.
+
+real    0m0.723s
+user    0m0.350s
+sys     0m0.373s
+
+# 结束时间: 2026-07-22 16:36:08 (GMT+3)
+
+=== 验证结果 ===
+
+1. 文件大小:
+   - test1m_blocks.bin: 557M (583,270,416 bytes)
+   - test1m_blocks.bin.meta: 77K (77KB)
+
+2. Meta 文件内容:
+   - num_blocks=2225, block_size=262144, num_nodes=1000000, dim=128
+   - Block 行数: 2225 (与 num_blocks 一致 ✅)
+
+3. Header 格式验证:
+   - Magic: HKLB (0x484b4c42) ✅ 与 100K 一致
+   - Version: 1 ✅ 与 100K 一致
+   - Dim: 128 ✅ 与 100K 一致
+
+4. Block 覆盖验证:
+   - 节点范围: 0 ~ 1000000 ✅ 完整覆盖
+   - Min nodes/block: 413
+   - Max nodes/block: 491
+   - Avg nodes/block: 449.4
+   - Avg fill rate: 99.88%
+
+5. 与 100K 格式一致性:
+   - Magic: HKLB ✅
+   - Header 结构: 16 字节 ✅
+   - Meta 格式: num_blocks/block_size/num_nodes/dim + block 行 ✅
+   - Block 行格式: 'block N start end count size' ✅
+
+6. 文件大小合理性:
+   - 2225 blocks × 262144 bytes/block = 583,270,400 bytes (理论最大)
+   - 实际: 583,270,416 bytes (含 16 字节文件头)
+   - 比例: 1M/100K ≈ 9.8x (节点数 10x，合理) ✅
+
+# 状态: SUCCESS
+# 产出文件:
+   - output/test1m_blocks.bin (557MB, 583,270,416 bytes)
+   - output/test1m_blocks.bin.meta (77KB)
+# 验证结果: ALL PASSED ✅

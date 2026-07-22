@@ -1,0 +1,73 @@
+=== Task 2.2: DiskHNSW Test (Refactored) ===
+Parameters: k=10, ef=50, cache_slots=64
+  io_mode=cached, latency=100us, layout=bfs, policy=lru
+
+[1] Loading data...
+  Base: 1000 vectors, dim=128
+  Query: 1000 vectors
+  Load time: 0.00225179s
+
+[2] Loading full-memory HNSW index...
+  Loaded: 1000 nodes
+  Load time: 0.00590622s
+
+[3] Building pluggable components...
+[BfsLayoutProvider] Loaded route table: 1000 entries, 3 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=3, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+[4] Loading DiskHNSW...
+[DiskHNSW] Loading graph structure from output/test_graph.bin...
+  Loaded graph structure from output/test_graph.bin (1000 nodes)
+[DiskHNSW] Graph: 1000 nodes, dim=128, max_level=2, entry_point=115
+[DiskHNSW] Loading BFS order from output/test_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+  Load time: 0.00136874s
+
+[5] Computing ground truth...
+Computing ground truth (brute force)...
+  GT compute time: 0.257644s
+
+[6] Running full-memory HNSW search...
+
+[7] Running DiskHNSW search...
+
+[8] Comparing results...
+
+=== Test Results ===
+Dataset: 1000 base, 1000 query, dim=128
+Parameters: k=10, ef=50, cache_slots=64
+IO mode: cached, latency=100us, layout=bfs, policy=lru
+
+--- Recall ---
+  Full-memory HNSW recall@k vs GT:  99.27%
+  DiskHNSW recall@k vs GT:          99.27%
+  DiskHNSW recall@k vs HNSW:        100%
+
+--- Latency (microseconds) ---
+  Full-memory HNSW:
+    Mean: 127.263 us
+    P50:  124.705 us
+    P95:  147.402 us
+    P99:  181.342 us
+    Total: 128.086 ms
+  DiskHNSW:
+    Mean: 992.27 us
+    P50:  990.268 us
+    P95:  1031.72 us
+    P99:  1065.76 us
+    Total: 992.844 ms
+
+--- BlockCache Stats ---
+  Total accesses:  668764
+  Cache hits:      668761
+  Cache misses:    3
+  Hit rate:        99.9996%
+  Evictions:       0
+  Disk reads:      3
+  Cached blocks:   3/64
+
+=== Verdict ===
+  DiskHNSW vs HNSW recall >= 95%: PASS ✅
+  DiskHNSW vs GT recall: 99.27%
+  Latency ratio (disk/hnsw): 7.79702x

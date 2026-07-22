@@ -1,0 +1,91 @@
+=== Task 2.2: DiskHNSW Test ===
+Parameters: k=10, ef=50, cache_slots=64
+
+[1] Loading data...
+  Base: 100000 vectors, dim=128
+  Query: 100 vectors
+  Load time: 0.114495s
+
+[2] Loading full-memory HNSW index...
+  Loaded: 100000 nodes
+  Load time: 0.237993s
+
+[3] Loading DiskHNSW...
+[DiskHNSW] Loading graph structure from output/test100k_graph.bin...
+  Loaded graph structure from output/test100k_graph.bin (100000 nodes)
+[DiskHNSW] Graph: 100000 nodes, dim=128, max_level=4, entry_point=81624
+[DiskHNSW] Loading BFS order from output/test100k_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 100000 entries
+[DiskHNSW] Initializing BlockCache...
+[BlockCache] Initialized: block_size=262144, num_blocks=227, cache_slots=64, dim=128
+[BlockCache] Route table loaded: 100000 entries
+  Load time: 0.134727s
+
+[4] Computing ground truth...
+Computing ground truth (brute force)...
+  GT compute time: 2.53124s
+
+[5] Running full-memory HNSW search...
+
+[6] Running DiskHNSW search...
+
+[7] Comparing results...
+
+=== Test Results ===
+Dataset: 100000 base, 100 query, dim=128
+Parameters: k=10, ef=50, cache_slots=64
+
+--- Recall ---
+  Full-memory HNSW recall@k vs GT:  51.1%
+  DiskHNSW recall@k vs GT:          51.1%
+  DiskHNSW recall@k vs HNSW:        100%
+
+--- Latency (microseconds) ---
+  Full-memory HNSW:
+    Mean: 431.549 us
+    P50:  417.946 us
+    P95:  542.329 us
+    P99:  818.204 us
+    Total: 43.2617 ms
+  DiskHNSW:
+    Mean: 153880 us
+    P50:  152788 us
+    P95:  193927 us
+    P99:  220466 us
+    Total: 15388.3 ms
+
+--- BlockCache Stats ---
+  Total accesses:  157850
+  Cache hits:      92811
+  Cache misses:    65039
+  Hit rate:        58.797%
+  Evictions:       64975
+  Disk reads:      65039
+  Cached blocks:   64/64
+
+--- Sample Query Comparison (first 5 queries) ---
+  Query 0:
+    HNSW:   0 62257 96371 92691 31216 97276 35404 74235 51642 3105 
+    Disk:   0 62257 96371 92691 31216 97276 35404 74235 51642 3105 
+    GT:     0 62257 96371 92691 31216 97276 58184 35404 74235 51642 
+  Query 1:
+    HNSW:   9924 94724 97109 18379 50832 26547 95926 31783 46384 72236 
+    Disk:   9924 94724 97109 18379 50832 26547 95926 31783 46384 72236 
+    GT:     1 10643 20860 9924 14101 94724 447 97109 67053 15379 
+  Query 2:
+    HNSW:   11714 45944 9315 42065 12252 84952 26758 91369 64298 5298 
+    Disk:   11714 45944 9315 42065 12252 84952 26758 91369 64298 5298 
+    GT:     2 11714 66271 45944 9315 94358 51986 42065 78485 67661 
+  Query 3:
+    HNSW:   3 25490 95727 70926 1236 29920 76430 37302 38882 11719 
+    Disk:   3 25490 95727 70926 1236 29920 76430 37302 38882 11719 
+    GT:     3 25490 95727 70926 62257 1236 29920 76430 37302 38882 
+  Query 4:
+    HNSW:   53838 92604 15341 57766 13330 29588 16947 38829 55685 25962 
+    Disk:   53838 92604 15341 57766 13330 29588 16947 38829 55685 25962 
+    GT:     4 28433 29023 36708 53838 37442 92604 84141 83808 15341 
+
+=== Verdict ===
+  DiskHNSW vs HNSW recall >= 95%: PASS ✅
+  DiskHNSW vs GT recall: 51.1%
+  Latency ratio (disk/hnsw): 356.576x

@@ -1,0 +1,105 @@
+=== SIFT1M Comprehensive Benchmark ===
+k=10, ef=50
+
+[1] Loading data...
+  Base: 1000000, Query: 1000, dim=128
+  Load: 1.11013s
+
+[2] Loading ground truth...
+Loaded GT: 1000 queries, k=10
+
+[3] Configs: 1 baseline + 4 DiskHNSW
+
+[4] D1 baseline...
+
+>>> Running D1: Full-memory HNSW baseline
+  Recall@GT: 32.12% | Mean: 585.596us | RSS: 1213MB
+
+[5] DiskHNSW tests...
+
+>>> Running D2: DiskHNSW BFS+LRU, cache=64, cached
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+  Recall@GT: 32.12% | Recall@HNSW: 100% | Mean: 600362us | Hit: 33.9255% | RSS: 582MB
+
+>>> Running D3: DiskHNSW BFS+LRU, cache=256, cached
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=cached
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+  Recall@GT: 32.12% | Recall@HNSW: 100% | Mean: 363283us | Hit: 65.131% | RSS: 604MB
+
+>>> Running D4: DiskHNSW BFS+LRU, cache=64, simulated 100us
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=simulated
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+  Recall@GT: 32.12% | Recall@HNSW: 100% | Mean: 1.02271e+06us | Hit: 33.9255% | RSS: 659MB
+
+>>> Running D5: DiskHNSW BFS+LRU, cache=256, simulated 100us
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=simulated
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+  Recall@GT: 32.12% | Recall@HNSW: 100% | Mean: 565922us | Hit: 65.131% | RSS: 659MB
+
+[6] Generating JSON...
+JSON saved to logs/benchmark_1m_results.json
+
+=== Summary ===
+| ID   | Description                                   |    R@GT |  R@HNSW |  Mean(us) |   P99(us) |   Hit% |  RSS(MB) |
+|------|-----------------------------------------------|---------|---------|-----------|-----------|--------|----------|
+| D1   | Full-memory HNSW (baseline)                   |  32.12% | 100.00% |     585.6 |     786.9 |   0.0% |   1213MB |
+| D2   | DiskHNSW BFS+LRU, cache=64, cached            |  32.12% | 100.00% |  600361.9 |  865144.6 |  33.9% |    582MB |
+| D3   | DiskHNSW BFS+LRU, cache=256, cached           |  32.12% | 100.00% |  363283.4 |  540200.5 |  65.1% |    604MB |
+| D4   | DiskHNSW BFS+LRU, cache=64, simulated 100us   |  32.12% | 100.00% | 1022709.0 | 1449210.2 |  33.9% |    659MB |
+| D5   | DiskHNSW BFS+LRU, cache=256, simulated 100us  |  32.12% | 100.00% |  565922.0 |  823691.8 |  65.1% |    659MB |
+
+=== D Group Analysis ===
+
+1. Latency ratio (disk/hnsw):
+   D1 mean = 585.596 us (baseline)
+   D2/D1 = 1025.21x (cached, cache=64)
+   D3/D1 = 620.365x (cached, cache=256)
+   D4/D1 = 1746.44x (simulated, cache=64)
+   D5/D1 = 966.403x (simulated, cache=256)
+
+2. Memory usage:
+   D1 RSS = 1213 MB (full-memory HNSW)
+   D2 RSS = 582 MB, ratio = 2.08419x
+   D3 RSS = 604 MB, ratio = 2.00828x
+
+3. Cache scaling (64 -> 256):
+   Cached: 600362 -> 363283 us (speedup 1.6526x)
+   Hit rate: 33.9255% -> 65.131%
+
+4. Simulated NVMe (P99):
+   D1 P99 = 786.854 us
+   D4 P99 = 1.44921e+06 us (ratio 1841.78x)
+   D4 I/O wait/q = 116668 us, compute = 906041 us
+   D5 P99 = 823692 us (ratio 1046.82x)
+   D5 I/O wait/q = 61568 us, compute = 504354 us
+
+Done!

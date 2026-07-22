@@ -1,0 +1,38 @@
+# Task: 1.4 Generate Route Table (CORRECTED RUN)
+# 开始时间: 2026-07-22 16:40:38 (GMT+3)
+# 命令: ./build/gen_route output/test1m_blocks.bin output/test1m_route.bin
+# 注意: 第一次运行错误传了3个参数，导致 meta 文件被覆盖。现已修正为2个参数。
+
+=== Task 1.4: Generate Route Table ===
+Reading blocks from output/test1m_blocks.bin...
+  Block size: 262144 bytes, Num blocks: 2225
+  Total nodes in blocks: 1000000
+  Max node ID: 999999
+  All 1000000 nodes mapped to blocks.
+
+=== Route Table Statistics ===
+  Entries: 1000000
+  Blocks: 2225
+  Nodes per block: min=413, max=491
+
+Saving route table to output/test1m_route.bin...
+  File size: 4000016 bytes (3906.27 KB)
+Task 1.4 complete.
+
+# 结束时间: 2026-07-22 16:40:38 (GMT+3)
+# 状态: SUCCESS
+# 产出文件: output/test1m_route.bin (4000016 bytes, 3.9M)
+
+# === 验证结果 ===
+# Header: magic=TUOR ✅, num_entries=1000000 ✅, block_size=262144 ✅
+# 文件大小: 4000016 bytes (3.9MB) = 16B header + 1M×4B ✅
+# BlockID 范围: [0, 2224] ✅, 无未映射节点 ✅
+# 抽样检查 (9个节点): 全部匹配 meta 文件 ✅
+# Block 节点数: min=413, max=491, 2225 unique blocks ✅
+# 与 meta 文件 block count: 0 mismatches ✅
+# 连续性: blocks 连续覆盖 [0, 1000000) ✅
+# 与 100K 格式一致: ✅
+# 最终状态: ALL PASSED ✅
+
+# 注意: gen_route 只需2个参数 (blocks.bin route_table.bin)，不需要 meta 文件。
+# 首次运行误传3参数导致 meta 被覆盖，已用 write_blocks 重新生成 meta 文件。

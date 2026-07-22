@@ -1,0 +1,59 @@
+# Task: 1.1 Extract Graph Structure
+# 开始时间: 2026-07-22 16:28:08 (GMT+3)
+# 命令: ./build/extract_graph output/test1m_index.bin output/test1m_graph.bin 128
+
+=== Task 1.1: Extract Graph Structure ===
+Loading index from output/test1m_index.bin...
+  Loaded: 1000000 nodes
+Extracting node data and adjacency lists...
+  Processed 100000/1000000...
+  Processed 200000/1000000...
+  Processed 300000/1000000...
+  Processed 400000/1000000...
+  Processed 500000/1000000...
+  Processed 600000/1000000...
+  Processed 700000/1000000...
+  Processed 800000/1000000...
+  Processed 900000/1000000...
+  Processed 1000000/1000000...
+
+=== Extraction Statistics ===
+  Total nodes: 1000000
+  Entry point: 572119
+  Max level: 5
+  Nodes with upper levels: 63002 (6.3002%)
+  Level 0 edges: 16134100 (avg: 16.1341 per node)
+  Upper level edges: 819031
+  Level distribution:
+    Level 0: 936998 nodes
+    Level 1: 59129 nodes
+    Level 2: 3626 nodes
+    Level 3: 234 nodes
+    Level 4: 12 nodes
+    Level 5: 1 nodes
+  Saved graph structure to output/test1m_graph.bin (1000000 nodes)
+Task 1.1 complete.
+
+# 结束时间: 2026-07-22 16:28:09 (GMT+3)
+# 状态: SUCCESS
+# 产出文件: output/test1m_graph.bin (567M, 593946840 bytes)
+
+# === 验证结果 ===
+# Header 解析:
+#   magic: 0x47524148 (GRPH) ✅
+#   version: 1 ✅
+#   num_nodes: 1000000 ✅
+#   dim: 128 ✅
+#   maxM: 16 ✅
+#   maxM0: 32 ✅
+#   entry_point: 572119
+#   max_level: 5
+#   data_size: 512 (128 * 4 bytes) ✅
+#
+# 与 100K 版本对比:
+#   Magic/Version/Dim/maxM/maxM0/data_size: 完全一致 ✅
+#   num_nodes: 1M=1000000 vs 100K=100000 (10x) ✅
+#   文件大小: 1M=566.4MB vs 100K=57.8MB (9.81x) ✅ 合理
+#   max_level: 1M=5 vs 100K=4 (更大索引多一层) ✅ 合理
+#
+# 结论: 所有验证检查通过，格式与 100K 版本一致

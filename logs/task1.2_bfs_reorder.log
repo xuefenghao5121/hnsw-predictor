@@ -1,0 +1,133 @@
+# Task: 1.2 BFS Global Reorder
+# 开始时间: 2026-07-22 16:30:57 GMT+3
+# 命令: time ./build/bfs_reorder output/test1m_graph.bin output/test1m_bfs.bin
+
+=== Task 1.2: BFS Global Reorder ===
+  Loaded graph structure from output/test1m_graph.bin (1000000 nodes)
+Running BFS from entry point 572119...
+  BFS visited: 965851/1000000 nodes
+  Isolated nodes (appended at end): 34149
+
+=== BFS Reorder Statistics ===
+  Total nodes: 1000000
+  Average neighbor distance (BFS): 308593
+  Expected average distance (random): 333333
+  Distance improvement: 7.422%
+  Total edges (level 0): 16134100
+
+Saving BFS order to output/test1m_bfs.bin...
+  File size: 8000016 bytes
+Task 1.2 complete.
+
+# 结束时间: 2026-07-22 16:30:58 GMT+3
+# 状态: SUCCESS
+# 产出文件: output/test1m_bfs.bin (7.7M)
+=== 验证 output/test1m_bfs.bin ===
+
+1. 文件大小:
+-rw-rw-r-- 1 huawei huawei 7.7M Jul 22 16:30 output/test1m_bfs.bin
+   字节数: 8000016
+   预期: 1000000 * 8 + 16 = 8000016 bytes (header + int64 array)
+
+2. 前10个BFS顺序 (入口节点应在最前):
+00000010: 0bb9 0000 3df8 0a00 0d6a 0b00 56d9 0000  ....=....j..V...
+00000020: 803a 0b00 aafe 0c00 20e4 0d00 8b61 0b00  .:...... ....a..
+00000030: 3a71 0000 9fc8 0100 4561 0200 dfed 0d00  :q......Ea......
+00000040: 82d8 0100 e71a 0c00 eddd 0d00 077b 0e00  .............{..
+00000050: 8961 0b00 c965 0e00 3cbf 0200 98e0 0200  .a...e..<.......
+
+3. 后10个BFS顺序 (孤立节点应在最后):
+   Magic: b'\x00SFB@B\x0f\x00'
+   Num nodes: 572119
+   前10个BFS顺序:
+     [0] -> 原始节点ID: 3087690643847435
+     [1] -> 原始节点ID: 238963391162893
+     [2] -> 原始节点ID: 3657705819159168
+     [3] -> 原始节点ID: 3203474373076000
+     [4] -> 原始节点ID: 502060202094906
+     [5] -> 原始节点ID: 3920716730884421
+     [6] -> 原始节点ID: 3407279160416386
+     [7] -> 原始节点ID: 4075919669845485
+     [8] -> 原始节点ID: 4052563637526921
+     [9] -> 原始节点ID: 809893393252156
+   后10个BFS顺序:
+     [572109] -> 原始节点ID: 2823683299895153
+     [572110] -> 原始节点ID: 443927819969204
+     [572111] -> 原始节点ID: 4256445735312446
+     [572112] -> 原始节点ID: 3415357994425057
+     [572113] -> 原始节点ID: 3827348437450829
+     [572114] -> 原始节点ID: 2908148126842244
+     [572115] -> 原始节点ID: 3495944465875240
+     [572116] -> 原始节点ID: 3951352732632863
+     [572117] -> 原始节点ID: 3454248922822669
+     [572118] -> 原始节点ID: 4202565370550917
+
+4. 与100K版本格式对比:
+   output/test100k_bfs.bin: magic=b'\x00SFB\xa0\x86\x01\x00', num_nodes=81624, header_size=16
+   output/test1m_bfs.bin: magic=b'\x00SFB@B\x0f\x00', num_nodes=572119, header_size=16
+Traceback (most recent call last):
+  File "<string>", line 32, in <module>
+struct.error: unpack requires a buffer of 4 bytes
+=== Header ===
+  Magic: 0x42465300 (expected 0x42465300)
+  Num nodes: 1000000
+  Entry point: 572119
+  Reserved: 0
+  Header valid: True
+
+=== old_to_new[0:10] (old_id -> new_id) ===
+  old_id=0 -> new_id=47371
+  old_id=1 -> new_id=718909
+  old_id=2 -> new_id=748045
+  old_id=3 -> new_id=55638
+  old_id=4 -> new_id=735872
+  old_id=5 -> new_id=851626
+  old_id=6 -> new_id=910368
+  old_id=7 -> new_id=745867
+  old_id=8 -> new_id=28986
+  old_id=9 -> new_id=116895
+
+  old_id=572119 (entry point) -> new_id=0
+
+=== bfs_order[0:10] (new_id -> old_id) ===
+  new_id=0 -> old_id=572119
+  new_id=1 -> old_id=815105
+  new_id=2 -> old_id=371301
+  new_id=3 -> old_id=853868
+  new_id=4 -> old_id=270478
+  new_id=5 -> old_id=431027
+  new_id=6 -> old_id=919839
+  new_id=7 -> old_id=598054
+  new_id=8 -> old_id=609559
+  new_id=9 -> old_id=724754
+=== bfs_order[-10:] (isolated nodes at end) ===
+  new_id=999990 -> old_id=999617
+  new_id=999991 -> old_id=999690
+  new_id=999992 -> old_id=999709
+  new_id=999993 -> old_id=999716
+  new_id=999994 -> old_id=999730
+  new_id=999995 -> old_id=999768
+  new_id=999996 -> old_id=999839
+  new_id=999997 -> old_id=999842
+  new_id=999998 -> old_id=999946
+  new_id=999999 -> old_id=999967
+
+=== File Size ===
+  Actual: 8000016 bytes (7.63 MB)
+  Expected: 8000016 bytes (7.63 MB)
+  Match: True
+
+=== Permutation Check ===
+  Unique IDs in bfs_order: 1000000
+  Expected: 1000000
+  Min ID: 0, Max ID: 999999
+  Valid permutation: True
+
+  old_to_new[572119] = 0 (expected 0, entry point first)
+  bfs_order[0] = 572119 (expected 572119, entry point)
+
+=== 100K Format Comparison ===
+  100K: magic=0x42465300, num_nodes=100000, entry_point=81624
+  1M:   magic=0x42465300, num_nodes=1000000, entry_point=572119
+  Format consistent: True
+  100K file size: 800016 (expected 800016, match=True)
