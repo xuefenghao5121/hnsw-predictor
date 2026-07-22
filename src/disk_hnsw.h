@@ -130,6 +130,10 @@ public:
     // 重置预取统计
     void resetPrefetchStats();
 
+    // ---- Phase 3: 轨迹采集 ----
+    void setTraceCallback(std::function<void(uint32_t, bool)> cb) { cache_->setTraceCallback(std::move(cb)); }
+    void clearTraceCallback() { cache_->clearTraceCallback(); }
+
 private:
     // ---- 图数据（常驻内存，old_id空间）----
     GraphStructure graph_;          // 从graph_structure.bin加载

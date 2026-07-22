@@ -20,6 +20,7 @@
 #include <mutex>
 #include <atomic>
 #include <memory>
+#include <functional>
 
 #include "common.h"
 #include "layout_provider.h"
@@ -174,6 +175,14 @@ public:
     // 返回最近 N 个被加载的 block_id（按时间顺序）
     std::vector<uint32_t> getRecentBlockAccesses(size_t n = 10) const;
 
+    // ---- Phase 3: 轨迹记录回调 ----
+    using TraceCallback = std::function<void(uint32_t block_id, bool is_hit)>;
+    friend class DiskHNSW;
+
+    // 设置轨迹回调（每次 block 访问时调用，hit 或 miss）
+    void setTraceCallback(TraceCallback cb) { trace_cb_ = std::move(cb); }
+    void clearTraceCallback() { trace_cb_ = nullptr; }
+
     // ---- 路由查询 ----
 
     // 获取节点所在的 Block ID（通过布局编排器）
@@ -239,6 +248,10 @@ private:
     // ---- Phase 3: 访问历史记录 ----
     std::vector<uint32_t> recent_accesses_;  // 最近访问的 block_id 序列
     static constexpr size_t MAX_RECENT_ACCESSES = 1024;
+
+    // ---- Phase 3: 轨迹回调 ----
+    TraceCallback trace_cb_;
+    friend class DiskHNSW;
 
     // ---- 内部方法 ----
 

@@ -318,6 +318,7 @@ CachedBlock* BlockCache::getBlockByNodeId(uint32_t node_id) {
         // 缓存命中
         stats_.cache_hits++;
         policy_->onAccess(block_id);
+        if (trace_cb_) trace_cb_(block_id, true);
         return &it->second;
     }
 
@@ -336,6 +337,7 @@ CachedBlock* BlockCache::getBlockByNodeId(uint32_t node_id) {
         // 插入缓存
         auto result = cache_map_.emplace(block_id, std::move(block));
         policy_->onInsert(block_id);
+        if (trace_cb_) trace_cb_(block_id, false);
         return &result.first->second;
     } catch (const std::exception& e) {
         std::cerr << "[BlockCache] ERROR: " << e.what() << std::endl;
@@ -355,6 +357,7 @@ CachedBlock* BlockCache::getBlockById(uint32_t block_id) {
     if (it != cache_map_.end()) {
         stats_.cache_hits++;
         policy_->onAccess(block_id);
+        if (trace_cb_) trace_cb_(block_id, true);
         return &it->second;
     }
 
@@ -368,6 +371,7 @@ CachedBlock* BlockCache::getBlockById(uint32_t block_id) {
         CachedBlock block = loadBlockFromDisk(block_id);
         auto result = cache_map_.emplace(block_id, std::move(block));
         policy_->onInsert(block_id);
+        if (trace_cb_) trace_cb_(block_id, false);
         return &result.first->second;
     } catch (const std::exception& e) {
         std::cerr << "[BlockCache] ERROR: " << e.what() << std::endl;

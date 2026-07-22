@@ -78,3 +78,7 @@ clean:
 	rm -f $(BUILD_DIR)/*
 
 .PHONY: all pipeline clean
+
+# Phase 3: Benchmark with prefetch
+$(BUILD_DIR)/benchmark_prefetch: $(SRC_DIR)/benchmark_prefetch.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/predictor.h $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.h $(SRC_DIR)/prefetcher.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_prefetch.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.cpp $(LDFLAGS)

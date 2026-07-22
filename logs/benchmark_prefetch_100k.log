@@ -1,0 +1,55 @@
+[1] Loading data...
+  Base: 100000, Query: 200, dim=128
+[2] E1: No prefetch (cache=64)...
+[DiskHNSW] Loading graph structure (slim) from output/test100k_graph.bin...
+  [slim] Loading vectors for 6140 upper-layer nodes (2MB, skipping 48MB)
+  [slim] Loaded graph structure from output/test100k_graph.bin (100000 nodes, 6140 upper)
+[DiskHNSW] Graph: 100000 nodes, dim=128, max_level=4, entry_point=81624
+[DiskHNSW] Loading BFS order from output/test100k_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 100000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 100000 entries, 227 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=227, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== E1: No prefetch ===
+  Recall@GT:    0%
+  Recall@HNSW:  100%
+  Mean:         163968 us
+  P50:          160245 us
+  P95:          205975 us
+  P99:          235278 us
+  QPS:          6.09876
+  Cache hit:    58.6677%
+  RSS:          79 MB
+
+[3] E2: With Markov prefetch (cache=64)...
+[DiskHNSW] Loading graph structure (slim) from output/test100k_graph.bin...
+  [slim] Loading vectors for 6140 upper-layer nodes (2MB, skipping 48MB)
+  [slim] Loaded graph structure from output/test100k_graph.bin (100000 nodes, 6140 upper)
+[DiskHNSW] Graph: 100000 nodes, dim=128, max_level=4, entry_point=81624
+[DiskHNSW] Loading BFS order from output/test100k_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 100000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 100000 entries, 227 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=227, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+[MarkovPredictor] Model loaded from logs/markov_100k.bin: 225 states, 1468077 transitions
+[Prefetcher] Started (max_queue=64)
+[DiskHNSW] Prefetch enabled (model: logs/markov_100k.bin)
+
+=== E2: Markov prefetch ===
+  Recall@GT:    0%
+  Recall@HNSW:  100%
+  Mean:         162012 us
+  P50:          158695 us
+  P95:          200928 us
+  P99:          241987 us
+  QPS:          6.17237
+  Cache hit:    59.1109%
+  RSS:          82 MB
+  Prefetch req:   4039
+  Prefetch skip:  29604
+  Prefetch load:  3168
+  Prefetch fail:  0
+[Prefetcher] Stopped
+
+=== Benchmark complete ===
