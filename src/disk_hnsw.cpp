@@ -237,6 +237,17 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         // 复制邻居ID到本地缓冲区
         std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
+        // ---- Phase 3: 预取 ----
+        // 获取当前 block_id，预测并预取
+        if (predictor_ && prefetcher_) {
+            uint32_t current_block = cache_->getBlockId(candidateId);
+            if (current_block != last_accessed_block_) {
+                auto candidates = predictor_->predict(current_block, 3);
+                prefetcher_->submitBatch(candidates);
+                last_accessed_block_ = current_block;
+            }
+        }
+
         // 遍历邻居（使用本地副本，安全）
         for (uint32_t j = 0; j < local_neighbors.size(); j++) {
             uint32_t neighborId = local_neighbors[j];
@@ -323,4 +334,35 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
     }
 
     return result;
+}
+
+// ============================================================
+// Phase 3: 预取支持
+// ============================================================
+
+void DiskHNSW::enablePrefetch(const std::string& model_path) {
+    predictor_ = std::make_unique<MarkovPredictor>();
+    predictor_->loadModel(model_path);
+    prefetcher_ = std::make_unique<Prefetcher>(cache_.get(), 64);
+    last_accessed_block_ = UINT32_MAX;
+    std::cout << "[DiskHNSW] Prefetch enabled (model: " << model_path << ")" << std::endl;
+}
+
+void DiskHNSW::disablePrefetch() {
+    if (prefetcher_) {
+        prefetcher_->flush();
+        prefetcher_.reset();
+    }
+    predictor_.reset();
+    std::cout << "[DiskHNSW] Prefetch disabled" << std::endl;
+}
+
+const Prefetcher::Stats& DiskHNSW::getPrefetchStats() const {
+    static const Prefetcher::Stats empty_stats;
+    if (prefetcher_) return prefetcher_->getStats();
+    return empty_stats;
+}
+
+void DiskHNSW::resetPrefetchStats() {
+    if (prefetcher_) prefetcher_->resetStats();
 }

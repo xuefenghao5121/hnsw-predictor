@@ -160,6 +160,20 @@ public:
     // 返回 true 表示成功加载到缓存
     bool prefetchBlock(uint32_t block_id);
 
+    // ---- Phase 3: 预取支持接口 ----
+
+    // 检查 Block 是否已在缓存中（不加锁，线程安全读取）
+    bool isInCache(uint32_t block_id) const;
+
+    // 尝试预取 Block（线程安全，用于后台预取线程）
+    // 如果 block 已在缓存，返回 true（无需加载）
+    // 如果 block 不在缓存，加载到缓存并返回 true，失败返回 false
+    bool tryPrefetch(uint32_t block_id);
+
+    // 获取最近访问的 Block ID（用于预测器推理）
+    // 返回最近 N 个被加载的 block_id（按时间顺序）
+    std::vector<uint32_t> getRecentBlockAccesses(size_t n = 10) const;
+
     // ---- 路由查询 ----
 
     // 获取节点所在的 Block ID（通过布局编排器）
@@ -221,6 +235,10 @@ private:
 
     // ---- 统计 ----
     Stats stats_;
+
+    // ---- Phase 3: 访问历史记录 ----
+    std::vector<uint32_t> recent_accesses_;  // 最近访问的 block_id 序列
+    static constexpr size_t MAX_RECENT_ACCESSES = 1024;
 
     // ---- 内部方法 ----
 

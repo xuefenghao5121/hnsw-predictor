@@ -15,6 +15,8 @@
 #include "block_cache.h"
 #include "layout_provider.h"
 #include "replacement_policy.h"
+#include "predictor.h"
+#include "prefetcher.h"
 
 #include <vector>
 #include <string>
@@ -111,6 +113,23 @@ public:
     uint32_t oldToNew(uint32_t old_id) const { return old_to_new_[old_id]; }
     uint32_t newToOld(uint32_t new_id) const { return new_to_old_[new_id]; }
 
+    // ---- Phase 3: 预取支持 ----
+
+    // 启用预取（加载 Markov 模型）
+    void enablePrefetch(const std::string& model_path);
+
+    // 禁用预取
+    void disablePrefetch();
+
+    // 是否已启用预取
+    bool isPrefetchEnabled() const { return prefetcher_ != nullptr; }
+
+    // 获取预取统计
+    const Prefetcher::Stats& getPrefetchStats() const;
+
+    // 重置预取统计
+    void resetPrefetchStats();
+
 private:
     // ---- 图数据（常驻内存，old_id空间）----
     GraphStructure graph_;          // 从graph_structure.bin加载
@@ -126,6 +145,11 @@ private:
 
     // 缓存配置信息（从 cache_ 获取后保存，用于日志）
     size_t cache_slots_ = 0;
+
+    // ---- Phase 3: 预测器 + 预取器 ----
+    std::unique_ptr<MarkovPredictor> predictor_;
+    std::unique_ptr<Prefetcher> prefetcher_;
+    uint32_t last_accessed_block_ = UINT32_MAX;  // 上次访问的 block_id
 
     // ---- 访问标记 ----
     // 每次搜索创建新的VisitedList，不需要线程安全

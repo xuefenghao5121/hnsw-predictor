@@ -435,3 +435,54 @@ size_t BlockCache::getNumCachedBlocks() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return cache_map_.size();
 }
+
+// ============================================================
+// Phase 3: 预取支持接口
+// ============================================================
+
+bool BlockCache::isInCache(uint32_t block_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return cache_map_.find(block_id) != cache_map_.end();
+}
+
+bool BlockCache::tryPrefetch(uint32_t block_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 已在缓存，无需预取
+    if (cache_map_.find(block_id) != cache_map_.end()) {
+        return true;
+    }
+
+    // 检查 block_id 是否有效
+    if (block_id >= num_blocks_) {
+        return false;
+    }
+
+    // 如果缓存已满，先淘汰
+    while (cache_map_.size() >= cache_slots_) {
+        if (!evictOne()) break;
+    }
+
+    // 加载 Block 到缓存
+    try {
+        CachedBlock block = loadBlockFromDisk(block_id);
+        cache_map_[block_id] = std::move(block);
+        policy_->onInsert(block_id);
+        recent_accesses_.push_back(block_id);
+        if (recent_accesses_.size() > MAX_RECENT_ACCESSES) {
+            recent_accesses_.erase(recent_accesses_.begin());
+        }
+        // 预取的 block 不计入 total_accesses（那是主线程的统计）
+        // 但计入 disk_reads
+        stats_.disk_reads++;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::vector<uint32_t> BlockCache::getRecentBlockAccesses(size_t n) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    size_t start = recent_accesses_.size() > n ? recent_accesses_.size() - n : 0;
+    return std::vector<uint32_t>(recent_accesses_.begin() + start, recent_accesses_.end());
+}
