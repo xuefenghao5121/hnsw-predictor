@@ -216,3 +216,64 @@ Parameters: k=10, ef=50, cache_slots=64
 [5] Running full-memory HNSW search...
 
 [6] Running DiskHNSW search...
+
+[7] Comparing results...
+
+=== Test Results ===
+Dataset: 100000 base, 100000 query, dim=128
+Parameters: k=10, ef=50, cache_slots=64
+
+--- Recall ---
+  Full-memory HNSW recall@k vs GT:  58.1994%
+  DiskHNSW recall@k vs GT:          58.1994%
+  DiskHNSW recall@k vs HNSW:        99.9996%
+
+--- Latency (microseconds) ---
+  Full-memory HNSW:
+    Mean: 391.368 us
+    P50:  384.1 us
+    P95:  470.448 us
+    P99:  518.399 us
+    Total: 39237 ms
+  DiskHNSW:
+    Mean: 181974 us
+    P50:  179147 us
+    P95:  229165 us
+    P99:  258318 us
+    Total: 1.81977e+07 ms
+
+--- BlockCache Stats ---
+  Total accesses:  158146971
+  Cache hits:      93804818
+  Cache misses:    64342153
+  Hit rate:        59.315%
+  Evictions:       64342089
+  Disk reads:      64342153
+  Cached blocks:   64/64
+
+--- Sample Query Comparison (first 5 queries) ---
+  Query 0:
+    HNSW:   0 62257 96371 92691 31216 97276 35404 74235 51642 3105 
+    Disk:   0 62257 96371 92691 31216 97276 35404 74235 51642 3105 
+    GT:     0 62257 96371 92691 31216 97276 58184 35404 74235 51642 
+  Query 1:
+    HNSW:   9924 94724 97109 18379 50832 26547 95926 31783 46384 72236 
+    Disk:   9924 94724 97109 18379 50832 26547 95926 31783 46384 72236 
+    GT:     1 10643 20860 9924 14101 94724 447 97109 67053 15379 
+  Query 2:
+    HNSW:   11714 45944 9315 42065 12252 84952 26758 91369 64298 5298 
+    Disk:   11714 45944 9315 42065 12252 84952 26758 91369 64298 5298 
+    GT:     2 11714 66271 45944 9315 94358 51986 42065 78485 67661 
+  Query 3:
+    HNSW:   3 25490 95727 70926 1236 29920 76430 37302 38882 11719 
+    Disk:   3 25490 95727 70926 1236 29920 76430 37302 38882 11719 
+    GT:     3 25490 95727 70926 62257 1236 29920 76430 37302 38882 
+  Query 4:
+    HNSW:   53838 92604 15341 57766 13330 29588 16947 38829 55685 25962 
+    Disk:   53838 92604 15341 57766 13330 29588 16947 38829 55685 25962 
+    GT:     4 28433 29023 36708 53838 37442 92604 84141 83808 15341 
+
+=== Verdict ===
+  DiskHNSW vs HNSW recall >= 95%: PASS ✅
+  DiskHNSW vs GT recall: 58.1994%
+  Latency ratio (disk/hnsw): 464.97x

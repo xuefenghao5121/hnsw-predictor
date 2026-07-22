@@ -1,0 +1,152 @@
+[1] Loading data...
+  Base: 1000000, Query: 200, dim=128
+  Blocks: 2225 (file=583270416 bytes)
+
+[2] E0: Full-memory (cache=2225)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== E0: Full-mem ===
+  Recall@GT:    30.15%
+  Recall@HNSW:  100%
+  Mean:         5660.99 us
+  P50:          5493.99 us
+  P95:          6983.72 us
+  P99:          7434.18 us
+  QPS:          176.628
+  Cache hit:    100%
+  RSS:          1131 MB
+
+[3] E1: No prefetch (cache=64)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== E1: Disk c64 ===
+  Recall@GT:    30.15%
+  Recall@HNSW:  100%
+  Mean:         274739 us
+  P50:          266007 us
+  P95:          352943 us
+  P99:          395650 us
+  QPS:          3.63981
+  Cache hit:    33.7811%
+  RSS:          1132 MB
+
+[4] E2: Markov prefetch (cache=64)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+[MarkovPredictor] Model loaded from logs/markov_1m.bin: 2083 states, 1764695 transitions
+[Prefetcher] Started (max_queue=64)
+[DiskHNSW] Prefetch enabled (model: logs/markov_1m.bin)
+
+=== E2: Disk c64+pf ===
+  Recall@GT:    30.15%
+  Recall@HNSW:  100%
+  Mean:         312693 us
+  P50:          307598 us
+  P95:          398700 us
+  P99:          437127 us
+  QPS:          3.19802
+  Cache hit:    34.3398%
+  RSS:          1132 MB
+  Prefetch req:   13950
+  Prefetch skip:  24203
+  Prefetch load:  12250
+  Prefetch fail:  0
+[Prefetcher] Stopped
+
+[5] E3: No prefetch (cache=256)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== E3: Disk c256 ===
+  Recall@GT:    30.15%
+  Recall@HNSW:  100%
+  Mean:         162274 us
+  P50:          160251 us
+  P95:          210643 us
+  P99:          242705 us
+  QPS:          6.16241
+  Cache hit:    65.0087%
+  RSS:          1132 MB
+
+[6] E4: Markov prefetch (cache=256)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=cached
+[MarkovPredictor] Model loaded from logs/markov_1m.bin: 2083 states, 1764695 transitions
+[Prefetcher] Started (max_queue=64)
+[DiskHNSW] Prefetch enabled (model: logs/markov_1m.bin)
+
+=== E4: Disk c256+pf ===
+  Recall@GT:    30.15%
+  Recall@HNSW:  100%
+  Mean:         176282 us
+  P50:          174037 us
+  P95:          228627 us
+  P99:          256101 us
+  QPS:          5.67271
+  Cache hit:    65.2349%
+  RSS:          1132 MB
+  Prefetch req:   2956
+  Prefetch skip:  33631
+  Prefetch load:  2822
+  Prefetch fail:  0
+[Prefetcher] Stopped
+
+
+========== 竞品对比总结 ==========
+
+| 配置 | Mean(ms) | P50(ms) | P95(ms) | P99(ms) | QPS | Cache% | RSS(MB) | Recall@HNSW |
+|------|----------|---------|---------|---------|-----|--------|---------|-------------|
+| E0: Full-mem | 5.66099 | 5.49399 | 6.98372 | 7.43418 | 176.628 | 100 | 1131 | 100% |
+| E1: Disk c64 | 274.739 | 266.007 | 352.943 | 395.65 | 3.63981 | 33.7811 | 1132 | 100% |
+| E2: Disk c64+pf | 312.693 | 307.598 | 398.7 | 437.127 | 3.19802 | 34.3398 | 1132 | 100% |
+| E3: Disk c256 | 162.274 | 160.251 | 210.643 | 242.705 | 6.16241 | 65.0087 | 1132 | 100% |
+| E4: Disk c256+pf | 176.282 | 174.037 | 228.627 | 256.101 | 5.67271 | 65.2349 | 1132 | 100% |
+
+相对全内存(E0)对比:
+| 配置 | 延迟倍数 | QPS比 | 内存比 | 内存节省 |
+|------|---------|-------|--------|---------|
+| E0: Full-mem | 1x | 1x | 1x | 0% |
+| E1: Disk c64 | 48.532x | 0.0206072x | 1.00088x | -0.0884173% |
+| E2: Disk c64+pf | 55.2365x | 0.018106x | 1.00088x | -0.0884173% |
+| E3: Disk c256 | 28.6653x | 0.0348892x | 1.00088x | -0.0884173% |
+| E4: Disk c256+pf | 31.1398x | 0.0321167x | 1.00088x | -0.0884173% |
+
+==================================
+

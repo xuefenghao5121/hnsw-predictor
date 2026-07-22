@@ -1,0 +1,26 @@
+[1] Loading data...
+  Base: 1000000, Query: 1000, dim=128
+[2] Building DiskHNSW (cache_slots=64)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+[3] Collecting traces...
+  Query 100/1000 (blocks=1777, hit_rate=31.7389%)
+  Query 200/1000 (blocks=2041, hit_rate=31.9941%)
+  Query 300/1000 (blocks=1674, hit_rate=32.6762%)
+  Query 400/1000 (blocks=1644, hit_rate=34.6107%)
+  Query 500/1000 (blocks=1689, hit_rate=32.2676%)
+  Query 600/1000 (blocks=1754, hit_rate=37.1722%)
+  Query 700/1000 (blocks=1907, hit_rate=32.8789%)
+  Query 800/1000 (blocks=2375, hit_rate=33.3474%)
+  Query 900/1000 (blocks=1764, hit_rate=42.9705%)
+  Query 1000/1000 (blocks=2363, hit_rate=28.0576%)
+[4] Traces saved to logs/traces_1m_cache64.txt
+    Total accesses: 1765695
+    Overall hit rate: 33.9255%
