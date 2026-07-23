@@ -30,15 +30,13 @@ int GraphPrefetcher::submitPrefetch(const std::vector<uint32_t>& block_ids, bool
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    int submitted = 0;
-    for (uint32_t block_id : block_ids) {
-        // 检查是否已在缓存中
-        if (cache_->isInCache(block_id)) {
-            stats_.prefetch_skipped++;
-            continue;
-        }
+    // 优化：批量检查缓存，一次加锁替代 N 次加锁
+    // 先过滤掉已在缓存中的 block
+    std::vector<uint32_t> to_submit = cache_->filterNotInCache(block_ids);
 
-        // 检查是否已有 pending 请求
+    int submitted = 0;
+    for (uint32_t block_id : to_submit) {
+        // 再次检查 pending（可能在上一批 submit 中已提交）
         if (pending_requests_.count(block_id)) {
             stats_.prefetch_skipped++;
             continue;
@@ -72,6 +70,9 @@ int GraphPrefetcher::submitPrefetch(const std::vector<uint32_t>& block_ids, bool
         stats_.prefetch_submitted++;
     }
 
+    // 统计跳过的 block（已在缓存中的）
+    stats_.prefetch_skipped += block_ids.size() - to_submit.size();
+
     if (submitted > 0 && auto_submit) {
         // 批量提交到内核
         ring_.submit();
@@ -101,8 +102,44 @@ int GraphPrefetcher::reapCompletions() {
     int count = ring_.reapCompletions(results);
     stats_.reap_calls++;
 
+    // 收集所有完成的 block，批量插入 BlockCache
+    // 优化：parseBlock 在锁外完成，一次加锁插入所有 block
+    std::vector<BlockCache::BatchEntry> batch_entries;
+    std::vector<int> used_buf_idxs;  // 记录使用的 buffer idx，后续释放
+
     for (const auto& cqe : results) {
-        processCompletion(cqe.user_data, cqe.res);
+        uint32_t block_id = (uint32_t)cqe.user_data;
+
+        auto it = pending_requests_.find(cqe.user_data);
+        if (it == pending_requests_.end()) {
+            continue;
+        }
+
+        int buf_idx = it->second;
+        pending_requests_.erase(it);
+
+        if (cqe.res < 0 || (size_t)cqe.res < block_size_) {
+            ring_.freeBuffer(buf_idx);
+            stats_.prefetch_failed++;
+            continue;
+        }
+
+        // 收集到批量插入列表
+        void* buf = ring_.getBuffer(buf_idx);
+        batch_entries.push_back({block_id, buf, block_size_});
+        used_buf_idxs.push_back(buf_idx);
+
+        stats_.prefetch_completed++;
+    }
+
+    // 批量插入：锁外 parse + 一次加锁 insert
+    if (!batch_entries.empty()) {
+        cache_->insertBlocksBatch(batch_entries);
+    }
+
+    // 批量插入完成后，释放所有 io_uring 缓冲区
+    for (int idx : used_buf_idxs) {
+        ring_.freeBuffer(idx);
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();

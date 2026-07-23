@@ -263,6 +263,12 @@ void BlockCache::parseBlock(CachedBlock& block) {
     const uint32_t* node_ids = reinterpret_cast<const uint32_t*>(
         base + sizeof(BlockHeader));
 
+    // BFS 重排保证 block 内 node_id 连续，记录 first_node_id
+    // 后续用 node_id - first_node_id 直接索引，无需 hash map
+    if (block.node_count > 0) {
+        block.first_node_id = node_ids[0];
+    }
+
     // ---- 解析 Vectors ----
     const float* vectors = reinterpret_cast<const float*>(
         base + bh.data_offset);
@@ -273,7 +279,7 @@ void BlockCache::parseBlock(CachedBlock& block) {
 
     // ---- 构建展开后的节点索引 ----
     block.nodes.resize(block.node_count);
-    block.node_id_to_local.reserve(block.node_count);
+    // 不再需要 node_id_to_local reserve 和构建
 
     for (uint32_t i = 0; i < block.node_count; i++) {
         CachedNode& node = block.nodes[i];
@@ -293,8 +299,7 @@ void BlockCache::parseBlock(CachedBlock& block) {
             node.neighbors = reinterpret_cast<const uint32_t*>(adj_ptr);
             adj_ptr += cnt * sizeof(uint32_t);
         }
-
-        block.node_id_to_local[node.node_id] = i;
+        // 不再构建 node_id_to_local hash map
     }
 }
 
@@ -488,6 +493,18 @@ bool BlockCache::isInCache(uint32_t block_id) const {
     return cache_map_.find(block_id) != cache_map_.end();
 }
 
+std::vector<uint32_t> BlockCache::filterNotInCache(const std::vector<uint32_t>& block_ids) const {
+    std::vector<uint32_t> not_cached;
+    not_cached.reserve(block_ids.size());
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (uint32_t bid : block_ids) {
+        if (cache_map_.find(bid) == cache_map_.end()) {
+            not_cached.push_back(bid);
+        }
+    }
+    return not_cached;
+}
+
 bool BlockCache::tryPrefetch(uint32_t block_id) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -609,4 +626,58 @@ void BlockCache::dropPageCache() {
         // 告诉内核：整个 blocks 文件的 page cache 都不再需要
         posix_fadvise(blocks_fd_, 0, 0, POSIX_FADV_DONTNEED);
     }
+}
+
+// ============================================================
+// Phase 3 CPU Opt: 批量插入 + 快速缓存访问
+// ============================================================
+
+bool BlockCache::insertBlocksBatch(const std::vector<BatchEntry>& entries) {
+    if (entries.empty()) return true;
+
+    // 阶段 1: 锁外解析所有 block（CPU 密集，无需持锁）
+    std::vector<std::pair<uint32_t, CachedBlock>> parsed;
+    parsed.reserve(entries.size());
+
+    for (const auto& entry : entries) {
+        if (entry.block_id >= num_blocks_) continue;
+        if (entry.data_size != block_size_) continue;
+
+        CachedBlock block;
+        block.block_id = entry.block_id;
+        block.dim = dim_;
+        block.raw_data.resize(block_size_);
+        std::memcpy(block.raw_data.data(), entry.data, block_size_);
+        parseBlock(block);  // CPU work: memcpy + parse, 无锁
+        parsed.emplace_back(entry.block_id, std::move(block));
+    }
+
+    // 阶段 2: 一次加锁插入所有 block
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto& [block_id, block] : parsed) {
+        // 已在缓存，跳过
+        if (cache_map_.find(block_id) != cache_map_.end()) continue;
+
+        // 如果缓存已满，先淘汰
+        while (cache_map_.size() >= cache_slots_) {
+            if (!evictOne()) break;
+        }
+
+        cache_map_.emplace(block_id, std::move(block));
+        policy_->onInsert(block_id);
+        stats_.disk_reads++;
+    }
+
+    return true;
+}
+
+CachedBlock* BlockCache::getCachedBlockById(uint32_t block_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = cache_map_.find(block_id);
+    if (it != cache_map_.end()) {
+        policy_->onAccess(block_id);  // 更新 LRU 策略
+        return &it->second;
+    }
+    return nullptr;
 }

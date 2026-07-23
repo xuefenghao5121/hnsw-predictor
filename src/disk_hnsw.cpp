@@ -14,6 +14,7 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
+#include <immintrin.h>  // AVX2 intrinsics
 
 // ============================================================
 // 构造函数（原始接口，向后兼容）
@@ -125,14 +126,29 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
 // ============================================================
 
 float DiskHNSW::l2Distance(const float* a, const float* b) const {
-    // 简单的L2距离计算（与hnswlib L2Sqr一致）
-    // 后续可以替换为SIMD优化版本
-    float res = 0;
-    for (size_t i = 0; i < dim_; i++) {
-        float t = a[i] - b[i];
-        res += t * t;
+    // AVX2 SIMD 优化的 L2 距离计算 (8 floats at a time)
+    // 128 维 = 16 个 AVX2 向量
+    __m256 sum = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= dim_; i += 8) {
+        __m256 va = _mm256_loadu_ps(a + i);
+        __m256 vb = _mm256_loadu_ps(b + i);
+        __m256 diff = _mm256_sub_ps(va, vb);
+        sum = _mm256_fmadd_ps(diff, diff, sum);  // sum += diff * diff
     }
-    return res;
+    // 水平求和
+    __m128 lo = _mm256_castps256_ps128(sum);
+    __m128 hi = _mm256_extractf128_ps(sum, 1);
+    __m128 s = _mm_add_ps(lo, hi);
+    s = _mm_hadd_ps(s, s);
+    s = _mm_hadd_ps(s, s);
+    float result = _mm_cvtss_f32(s);
+    // 处理剩余元素
+    for (; i < dim_; i++) {
+        float t = a[i] - b[i];
+        result += t * t;
+    }
+    return result;
 }
 
 // ============================================================
@@ -200,15 +216,19 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
                         std::vector<std::pair<float, uint32_t>>,
                         std::greater<std::pair<float, uint32_t>>> candidate_set;  // 最小堆
 
+    // 路由表快速访问 lambda（避免虚函数调用）
+    auto getBlockIdFast = [&](uint32_t node_id) -> uint32_t {
+        if (route_table_) return (*route_table_)[node_id];
+        return cache_->getBlockId(node_id);
+    };
+
     // 初始化：计算入口节点距离
-    // 重要：获取向量后立即计算距离，不在此之后进行其他BlockCache访问
     const float* entryVec = cache_->getNodeVector(entry_new_id);
     if (!entryVec) {
         std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
         return candidate_set;  // 返回空
     }
     float entryDist = l2Distance(query, entryVec);
-    // 向量指针entryVec在此之后不再使用
     top_candidates.emplace(entryDist, entry_new_id);
     candidate_set.emplace(entryDist, entry_new_id);
     visited.markVisited(entry_new_id);
@@ -216,51 +236,92 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
     float lowerBound = entryDist;
 
     while (!candidate_set.empty()) {
-        // 取出距离最小的候选
         auto [candidateDist, candidateId] = candidate_set.top();
 
-        // 如果最小候选距离已经大于当前top candidates中的最大距离
-        // 且top candidates已满，可以停止
         if (candidateDist > lowerBound && top_candidates.size() == ef) {
             break;
         }
         candidate_set.pop();
 
-        // 获取候选节点的邻居列表（通过BlockCache，new_id空间）
-        // 重要：必须复制邻居ID列表，因为后续访问其他节点的向量时
-        // 可能导致当前Block被LRU淘汰，使指针失效
-        uint32_t neighborCount = 0;
-        const uint32_t* neighbors = cache_->getNodeNeighbors(candidateId, neighborCount);
+        // ---- 优化：直接获取 CachedBlock，避免后续多次锁 + 路由查找 ----
+        uint32_t curr_block_id = getBlockIdFast(candidateId);
+        CachedBlock* candidateBlock = cache_->getCachedBlockById(curr_block_id);
+        if (!candidateBlock) {
+            // 块不在缓存中（可能被淘汰），回退到 getNodeNeighbors
+            uint32_t neighborCount = 0;
+            const uint32_t* neighbors = cache_->getNodeNeighbors(candidateId, neighborCount);
+            if (!neighbors || neighborCount == 0) continue;
+            std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
+            // 回退路径：使用原始逻辑
+            // 提交预取
+            if (graph_prefetch_enabled_ && graph_prefetcher_) {
+                std::vector<uint32_t> prefetch_blocks;
+                for (uint32_t nid : local_neighbors) {
+                    uint32_t nblock = getBlockIdFast(nid);
+                    if (nblock != curr_block_id) prefetch_blocks.push_back(nblock);
+                }
+                std::sort(prefetch_blocks.begin(), prefetch_blocks.end());
+                prefetch_blocks.erase(std::unique(prefetch_blocks.begin(), prefetch_blocks.end()), prefetch_blocks.end());
+                if (!prefetch_blocks.empty()) graph_prefetcher_->submitPrefetch(prefetch_blocks, true);
+            }
+
+            struct PendingNeighbor { uint32_t neighborId; uint32_t blockId; };
+            std::vector<PendingNeighbor> pending_neighbors;
+
+            for (uint32_t nid : local_neighbors) {
+                if (nid >= graph_.num_nodes) continue;
+                if (visited.isVisited(nid)) continue;
+                visited.markVisited(nid);
+                uint32_t nblock = getBlockIdFast(nid);
+                if (cache_->isInCache(nblock)) {
+                    const float* nvec = cache_->getNodeVector(nid);
+                    if (!nvec) continue;
+                    float dist = l2Distance(query, nvec);
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, nid);
+                        top_candidates.emplace(dist, nid);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                    }
+                } else {
+                    pending_neighbors.push_back({nid, nblock});
+                }
+            }
+
+            if (!pending_neighbors.empty()) {
+                std::set<uint32_t> needed_blocks;
+                for (const auto& pn : pending_neighbors) needed_blocks.insert(pn.blockId);
+                if (graph_prefetch_enabled_ && graph_prefetcher_) graph_prefetcher_->waitForBlocks(needed_blocks);
+                for (const auto& pn : pending_neighbors) {
+                    const float* nvec = cache_->getNodeVector(pn.neighborId);
+                    if (!nvec) continue;
+                    float dist = l2Distance(query, nvec);
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, pn.neighborId);
+                        top_candidates.emplace(dist, pn.neighborId);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // ---- 快速路径：从 CachedBlock 直接获取邻居 ----
+        uint32_t neighborCount = 0;
+        const uint32_t* neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
         if (!neighbors || neighborCount == 0) continue;
 
-        // 复制邻居ID到本地缓冲区
+        // 复制邻居ID到本地缓冲区（因为后续操作可能导致 block 被淘汰）
         std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
-        // ---- Phase 3 Redesign: 图引导预取 (I/O 与计算重叠) ----
-        //
-        // 优化后的流水线 (保持搜索顺序不变):
-        //   1. 提交预取 -> I/O 在后台开始
-        //   2. 处理 in-cache 邻居 -> 计算距离, 与 I/O 并行
-        //   3. 收集 cache-miss 邻居的 block IDs
-        //   4. 批量等待所有需要的 blocks (waitForBlocks)
-        //   5. 处理 cache-miss 邻居 (此时已在缓存中)
-        //
-        // 关键改进:
-        //   1. 选择性批量等待: waitForBlocks 只等需要的 block (Opt 1+2)
-        //   2. 零拷贝: insertBlockFromPtr 避免 temp vector (Opt 3)
-        //   3. 减少 reap: 只在 waitForBlocks 内部 reap (Opt 4)
-        //   4. 批量提交: submitPrefetch 支持延迟提交 (Opt 5)
-
         // ---- 提交预取 (1-hop) ----
-        // 预取当前候选的邻居所在的 block
-        // I/O 在后台进行, 与后续 in-cache 邻居的距离计算重叠
         if (graph_prefetch_enabled_ && graph_prefetcher_) {
             std::vector<uint32_t> prefetch_blocks;
-            uint32_t curr_block = cache_->getBlockId(candidateId);
-            for (uint32_t j = 0; j < local_neighbors.size(); j++) {
-                uint32_t neighbor_block = cache_->getBlockId(local_neighbors[j]);
-                if (neighbor_block != curr_block) {
+            for (uint32_t nid : local_neighbors) {
+                uint32_t neighbor_block = getBlockIdFast(nid);
+                if (neighbor_block != curr_block_id) {
                     prefetch_blocks.push_back(neighbor_block);
                 }
             }
@@ -274,6 +335,8 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         }
 
         // ---- 处理 in-cache 邻居, 收集 cache-miss 邻居 ----
+        // 优化：用 getCachedBlockById 替代 isInCache + getNodeVector
+        // 减少：2 次锁获取 -> 1 次，N 次路由查找 -> 0 次（block_id 已知）
         struct PendingNeighbor {
             uint32_t neighborId;
             uint32_t blockId;
@@ -288,10 +351,13 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
 
             visited.markVisited(neighborId);
 
-            uint32_t neighbor_block = cache_->getBlockId(neighborId);
-            if (cache_->isInCache(neighbor_block)) {
-                // 缓存命中, 直接计算距离 (I/O 在后台并行进行)
-                const float* neighborVec = cache_->getNodeVector(neighborId);
+            uint32_t neighbor_block = getBlockIdFast(neighborId);
+
+            // 优化：用 getCachedBlockById 一次锁获取获取 block + vector
+            // 不再需要 isInCache + getNodeVector 两次锁
+            CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
+            if (nBlock) {
+                const float* neighborVec = nBlock->getVector(neighborId);
                 if (!neighborVec) continue;
 
                 float dist = l2Distance(query, neighborVec);
@@ -307,50 +373,64 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
                     }
                 }
             } else {
-                // 缓存未命中, 加入 pending 列表
                 pending_neighbors.push_back({neighborId, neighbor_block});
             }
         }
 
         // ---- 处理 pending 邻居 (批量等待) ----
-        // 使用 waitForBlocks 批量等待所有需要的 blocks
-        // 比 waitForCompletions 更高效: 只等需要的 block, 不等无关 I/O
-        // 比逐个 waitForBlock 更高效: 一次 wait+reap 可能完成多个 block
         if (!pending_neighbors.empty()) {
-            // 收集 unique block IDs
             std::set<uint32_t> needed_blocks;
             for (const auto& pn : pending_neighbors) {
                 needed_blocks.insert(pn.blockId);
             }
 
-            // 批量等待
             if (graph_prefetch_enabled_ && graph_prefetcher_) {
                 graph_prefetcher_->waitForBlocks(needed_blocks);
-            }
 
-            // 处理所有 pending 邻居 (此时它们的 block 应已在缓存中)
-            for (const auto& pn : pending_neighbors) {
-                const float* neighborVec = cache_->getNodeVector(pn.neighborId);
-                if (!neighborVec) continue;
+                // 预取完成后，用 getCachedBlockById 快速访问
+                for (const auto& pn : pending_neighbors) {
+                    CachedBlock* nBlock = cache_->getCachedBlockById(pn.blockId);
+                    if (!nBlock) continue;
+                    const float* neighborVec = nBlock->getVector(pn.neighborId);
+                    if (!neighborVec) continue;
 
-                float dist = l2Distance(query, neighborVec);
+                    float dist = l2Distance(query, neighborVec);
 
-                if (top_candidates.size() < ef || lowerBound > dist) {
-                    candidate_set.emplace(dist, pn.neighborId);
-                    top_candidates.emplace(dist, pn.neighborId);
-                    if (top_candidates.size() > ef) {
-                        top_candidates.pop();
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, pn.neighborId);
+                        top_candidates.emplace(dist, pn.neighborId);
+                        if (top_candidates.size() > ef) {
+                            top_candidates.pop();
+                        }
+                        if (!top_candidates.empty()) {
+                            lowerBound = top_candidates.top().first;
+                        }
                     }
-                    if (!top_candidates.empty()) {
-                        lowerBound = top_candidates.top().first;
+                }
+            } else {
+                // 无预取器：用 getNodeVector 触发磁盘加载
+                for (const auto& pn : pending_neighbors) {
+                    const float* neighborVec = cache_->getNodeVector(pn.neighborId);
+                    if (!neighborVec) continue;
+
+                    float dist = l2Distance(query, neighborVec);
+
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, pn.neighborId);
+                        top_candidates.emplace(dist, pn.neighborId);
+                        if (top_candidates.size() > ef) {
+                            top_candidates.pop();
+                        }
+                        if (!top_candidates.empty()) {
+                            lowerBound = top_candidates.top().first;
+                        }
                     }
                 }
             }
         }
     }
 
-    // 将top_candidates转换为最小堆返回（距离小的在堆顶）
-    // top_candidates是最大堆，我们需要反转
+    // 将top_candidates转换为最小堆返回
     std::priority_queue<std::pair<float, uint32_t>,
                         std::vector<std::pair<float, uint32_t>>,
                         std::greater<std::pair<float, uint32_t>>> result;
@@ -411,6 +491,14 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
 void DiskHNSW::enableGraphPrefetch(bool use_odirect) {
     graph_prefetcher_ = std::make_unique<GraphPrefetcher>(cache_.get(), 128, use_odirect);
     graph_prefetch_enabled_ = true;
+
+    // 缓存路由表指针，避免虚函数调用开销
+    // 通过 BfsLayoutProvider 的 getRouteTable() 获取
+    auto* bfs_layout = dynamic_cast<BfsLayoutProvider*>(cache_->layout_.get());
+    if (bfs_layout) {
+        route_table_ = &bfs_layout->getRouteTable();
+    }
+
     std::cout << "[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect="
               << (use_odirect ? "yes" : "no") << ")" << std::endl;
 }

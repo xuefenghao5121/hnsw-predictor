@@ -191,6 +191,10 @@ private:
     std::unique_ptr<GraphPrefetcher> graph_prefetcher_;
     bool graph_prefetch_enabled_ = false;
 
+    // ---- Phase 3 CPU Opt: 路由表缓存 ----
+    // 直接引用路由表，避免每次 getBlockId 的虚函数调用
+    const std::vector<uint32_t>* route_table_ = nullptr;
+
     // ---- Phase 3a: 查询间预取 ----
     bool recording_ = false;
     std::set<uint32_t> recorded_blocks_;

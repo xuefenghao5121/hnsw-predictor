@@ -62,6 +62,7 @@ struct CachedBlock {
     uint32_t block_id = 0;         // Block ID
     uint32_t node_count = 0;       // Block 内节点数
     uint32_t dim = 0;              // 向量维度
+    uint32_t first_node_id = 0;    // Block 内第一个 node_id（BFS 重排保证连续）
 
     // 原始磁盘数据（保持不释放，vectors 和 neighbors 指针指向这里）
     std::vector<uint8_t> raw_data;
@@ -69,25 +70,29 @@ struct CachedBlock {
     // 展开后的节点索引
     std::vector<CachedNode> nodes;
 
-    // 反向映射: 全局 node_id -> 本地索引（O(1) 查找）
-    std::unordered_map<uint32_t, uint32_t> node_id_to_local;
-
     // 获取指定全局节点 ID 的向量指针
     // 返回 nullptr 如果节点不在此 Block 中
+    // 优化：BFS 重排保证 block 内 node_id 连续，用减法替代 hash map
     const float* getVector(uint32_t node_id) const {
-        auto it = node_id_to_local.find(node_id);
-        if (it == node_id_to_local.end()) return nullptr;
-        return nodes[it->second].vector;
+        uint32_t local = node_id - first_node_id;
+        if (local >= node_count) return nullptr;
+        return nodes[local].vector;
     }
 
     // 获取指定全局节点 ID 的邻居列表
     // 返回 nullptr 如果节点不在此 Block 中
     // out_count 输出邻居数量
     const uint32_t* getNeighbors(uint32_t node_id, uint32_t& out_count) const {
-        auto it = node_id_to_local.find(node_id);
-        if (it == node_id_to_local.end()) return nullptr;
-        out_count = nodes[it->second].neighbor_count;
-        return nodes[it->second].neighbors;
+        uint32_t local = node_id - first_node_id;
+        if (local >= node_count) return nullptr;
+        out_count = nodes[local].neighbor_count;
+        return nodes[local].neighbors;
+    }
+
+    // 检查 node_id 是否在此 Block 中
+    bool containsNode(uint32_t node_id) const {
+        uint32_t local = node_id - first_node_id;
+        return local < node_count;
     }
 };
 
@@ -168,6 +173,10 @@ public:
     // 检查 Block 是否已在缓存中（不加锁，线程安全读取）
     bool isInCache(uint32_t block_id) const;
 
+    // 批量检查 blocks 是否在缓存中（一次加锁）
+    // 返回不在缓存中的 block_id 列表
+    std::vector<uint32_t> filterNotInCache(const std::vector<uint32_t>& block_ids) const;
+
     // 尝试预取 Block（线程安全，用于后台预取线程）
     // 如果 block 已在缓存，返回 true（无需加载）
     // 如果 block 不在缓存，加载到缓存并返回 true，失败返回 false
@@ -186,6 +195,23 @@ public:
     // 避免 processCompletion 中的临时 vector 分配 + memcpy
     // 内部会分配 raw_data 并做一次拷贝（无法避免，因为 CachedBlock 需要 vector）
     bool insertBlockFromPtr(uint32_t block_id, const void* data, size_t data_size);
+
+    // ---- Phase 3 CPU Opt: 批量插入 ----
+
+    // 批量插入条目
+    struct BatchEntry {
+        uint32_t block_id;
+        const void* data;
+        size_t data_size;
+    };
+
+    // 批量插入：在锁外解析所有 block，然后一次加锁插入所有 block
+    // 减少 N 次加锁到 1 次
+    bool insertBlocksBatch(const std::vector<BatchEntry>& entries);
+
+    // 获取已在缓存中的 Block（不加锁磁盘加载，miss 返回 nullptr）
+    // 用于 searchLayer0 中快速访问 in-cache block
+    CachedBlock* getCachedBlockById(uint32_t block_id);
 
     // 获取 Block 文件描述符（io_uring 读取用）
     int getBlocksFd() const { return blocks_fd_; }

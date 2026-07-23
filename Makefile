@@ -1,7 +1,7 @@
 # Makefile for HNSW Predictor Phase 1 & 2
 
 CXX = g++
-CXXFLAGS = -O2 -std=c++17 -Wall -Wextra -I./hnswlib
+CXXFLAGS = -O3 -std=c++17 -Wall -Wextra -I./hnswlib -march=native
 LDFLAGS = -pthread
 
 BUILD_DIR = build
