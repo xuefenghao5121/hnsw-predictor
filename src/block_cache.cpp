@@ -14,6 +14,7 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
@@ -60,11 +61,25 @@ BlockCache::BlockCache(const std::string& blocks_path,
                                  " - " + std::strerror(errno));
     }
 
+    // 读取文件头 (O_DIRECT 需要特殊处理)
     BlocksFileHeader fhdr;
-    ssize_t ret = pread(blocks_fd_, &fhdr, sizeof(BlocksFileHeader), 0);
-    if (ret != sizeof(BlocksFileHeader)) {
-        close(blocks_fd_);
-        throw std::runtime_error("BlockCache: Failed to read blocks file header");
+    if (io_config_.use_odirect) {
+        // O_DIRECT 需要_aligned buffer 和_aligned length
+        void* hdr_buf = nullptr;
+        posix_memalign(&hdr_buf, 512, 512);  // 读 512 字节
+        ssize_t ret = pread(blocks_fd_, hdr_buf, 512, 0);
+        if (ret != 512) {
+            close(blocks_fd_);
+            throw std::runtime_error("BlockCache: Failed to read blocks file header (O_DIRECT)");
+        }
+        std::memcpy(&fhdr, hdr_buf, sizeof(BlocksFileHeader));
+        free(hdr_buf);
+    } else {
+        ssize_t ret = pread(blocks_fd_, &fhdr, sizeof(BlocksFileHeader), 0);
+        if (ret != (ssize_t)sizeof(BlocksFileHeader)) {
+            close(blocks_fd_);
+            throw std::runtime_error("BlockCache: Failed to read blocks file header");
+        }
     }
 
     if (fhdr.magic != MAGIC_BLOCKS) {
@@ -78,6 +93,23 @@ BlockCache::BlockCache(const std::string& blocks_path,
     // 初始化 O_DIRECT 对齐缓冲区
     if (io_config_.use_odirect) {
         initAlignedBuffer();
+    }
+
+    // 初始化 mmap
+    if (io_config_.use_mmap) {
+        // 获取文件大小
+        off_t file_size = lseek(blocks_fd_, 0, SEEK_END);
+        mmap_size_ = (size_t)file_size;
+        mmap_ptr_ = mmap(nullptr, mmap_size_, PROT_READ, MAP_PRIVATE, blocks_fd_, 0);
+        if (mmap_ptr_ == MAP_FAILED) {
+            mmap_ptr_ = nullptr;
+            perror("BlockCache: mmap failed, falling back to pread");
+            io_config_.use_mmap = false;
+        } else {
+            // MADV_RANDOM: 禁止内核预读（我们是随机访问）
+            madvise(mmap_ptr_, mmap_size_, MADV_RANDOM);
+            std::cout << "[BlockCache] mmap'd " << mmap_size_ << " bytes with MADV_RANDOM" << std::endl;
+        }
     }
 
     std::cout << "[BlockCache] Initialized: block_size=" << block_size_
@@ -122,6 +154,9 @@ BlockCache::BlockCache(const std::string& blocks_path,
 }
 
 BlockCache::~BlockCache() {
+    if (mmap_ptr_ && mmap_ptr_ != MAP_FAILED) {
+        munmap(mmap_ptr_, mmap_size_);
+    }
     if (blocks_fd_ >= 0) {
         close(blocks_fd_);
     }
@@ -163,7 +198,7 @@ CachedBlock BlockCache::loadBlockFromDisk(uint32_t block_id) {
     simulateLatency();
 
     // 计算文件偏移量
-    off_t offset = sizeof(BlocksFileHeader) + (off_t)block_id * block_size_;
+    off_t offset = (off_t)BLOCKS_FILE_HEADER_SIZE + (off_t)block_id * block_size_;
 
     // 分配原始数据缓冲区
     CachedBlock block;
@@ -171,7 +206,11 @@ CachedBlock BlockCache::loadBlockFromDisk(uint32_t block_id) {
     block.dim = dim_;
     block.raw_data.resize(block_size_);
 
-    if (io_config_.use_odirect && aligned_buffer_) {
+    if (io_config_.use_mmap && mmap_ptr_) {
+        // mmap 模式: 直接 memcpy from mapped region
+        // page fault 自动处理 I/O，无 syscall
+        std::memcpy(block.raw_data.data(), (char*)mmap_ptr_ + offset, block_size_);
+    } else if (io_config_.use_odirect && aligned_buffer_) {
         // 使用 O_DIRECT 对齐缓冲区读取
         ssize_t ret = pread(blocks_fd_, aligned_buffer_, block_size_, offset);
         if (ret != (ssize_t)block_size_) {
@@ -485,8 +524,89 @@ bool BlockCache::tryPrefetch(uint32_t block_id) {
     }
 }
 
+// ============================================================
+// Phase 3 Redesign: io_uring 预取支持
+// ============================================================
+
+bool BlockCache::insertBlock(uint32_t block_id, std::vector<uint8_t>&& raw_data, size_t data_size) {
+    if (block_id >= num_blocks_) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 已在缓存，无需插入
+    if (cache_map_.find(block_id) != cache_map_.end()) {
+        return true;
+    }
+
+    // 如果缓存已满，先淘汰
+    while (cache_map_.size() >= cache_slots_) {
+        if (!evictOne()) break;
+    }
+
+    // 构建 CachedBlock
+    CachedBlock block;
+    block.block_id = block_id;
+    block.dim = dim_;
+    block.raw_data = std::move(raw_data);
+
+    // 解析 Block 数据
+    parseBlock(block);
+
+    // 插入缓存
+    cache_map_.emplace(block_id, std::move(block));
+    policy_->onInsert(block_id);
+    stats_.disk_reads++;  // 计为磁盘读（虽然是 io_uring 完成的）
+
+    return true;
+}
+
+bool BlockCache::insertBlockFromPtr(uint32_t block_id, const void* data, size_t data_size) {
+    if (block_id >= num_blocks_) return false;
+    if (data_size != block_size_) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // 已在缓存, 无需插入
+    if (cache_map_.find(block_id) != cache_map_.end()) {
+        return true;
+    }
+
+    // 如果缓存已满, 先淘汰
+    while (cache_map_.size() >= cache_slots_) {
+        if (!evictOne()) break;
+    }
+
+    // 构建 CachedBlock, 直接从指针拷贝一次
+    CachedBlock block;
+    block.block_id = block_id;
+    block.dim = dim_;
+    block.raw_data.resize(block_size_);
+    std::memcpy(block.raw_data.data(), data, block_size_);
+
+    // 解析 Block 数据
+    parseBlock(block);
+
+    // 插入缓存
+    cache_map_.emplace(block_id, std::move(block));
+    policy_->onInsert(block_id);
+    stats_.disk_reads++;
+
+    return true;
+}
+
 std::vector<uint32_t> BlockCache::getRecentBlockAccesses(size_t n) const {
     std::lock_guard<std::mutex> lock(mutex_);
     size_t start = recent_accesses_.size() > n ? recent_accesses_.size() - n : 0;
     return std::vector<uint32_t>(recent_accesses_.begin() + start, recent_accesses_.end());
+}
+
+// ============================================================
+// Phase 3 v2: Page cache 管理
+// ============================================================
+
+void BlockCache::dropPageCache() {
+    if (blocks_fd_ >= 0) {
+        // 告诉内核：整个 blocks 文件的 page cache 都不再需要
+        posix_fadvise(blocks_fd_, 0, 0, POSIX_FADV_DONTNEED);
+    }
 }

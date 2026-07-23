@@ -1,0 +1,20 @@
+=== 1. Loading oracle traces ===
+  Queries: 1000, Deltas: 1764695, Vocab: 3751
+  Delta=0: 8.2%
+  Top-10 coverage: 10.9%
+  Top-50 coverage: 20.7%
+  Top-100 coverage: 30.5%
+  Top-500 coverage: 70.7%
+
+=== 2. Markov 1st order ===
+  Delta: Top-1=11.32%, Top-10=20.83%
+  Block (Top-10): 73550/353063 = 20.83%
+
+=== 3. Multi-step block prediction ===
+  1-step: 20.83%
+  3-step: 30.93%
+  5-step: 35.73%
+  10-step: 43.22%
+
+=== 4. LSTM Training ===
+  Train: 1410632, Test: 353063

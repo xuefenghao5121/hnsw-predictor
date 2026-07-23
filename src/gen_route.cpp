@@ -35,6 +35,9 @@ int main(int argc, char** argv) {
     uint32_t num_blocks = fhdr.num_blocks;
     std::cout << "  Block size: " << block_size << " bytes, Num blocks: " << num_blocks << std::endl;
     
+    // 跳过头部 padding 到 BLOCKS_FILE_HEADER_SIZE
+    in.seekg(BLOCKS_FILE_HEADER_SIZE, std::ios::beg);
+    
     // 找出最大节点 ID 以确定路由表大小
     uint32_t max_node_id = 0;
     
@@ -64,7 +67,7 @@ int main(int argc, char** argv) {
     
     // 回到文件开头重新读取，构建路由表
     in.clear();
-    in.seekg(sizeof(BlocksFileHeader), std::ios::beg);
+    in.seekg(BLOCKS_FILE_HEADER_SIZE, std::ios::beg);
     
     std::vector<uint32_t> route_table(num_entries, 0xFFFFFFFF);  // 0xFFFFFFFF = not found
     

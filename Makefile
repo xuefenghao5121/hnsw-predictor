@@ -38,10 +38,9 @@ $(BUILD_DIR)/gen_route: $(SRC_DIR)/gen_route.cpp $(SRC_DIR)/common.h | $(BUILD_D
 $(BUILD_DIR)/test_block_cache: $(SRC_DIR)/test_block_cache.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/common.h | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/test_block_cache.cpp $(SRC_DIR)/block_cache.cpp $(LDFLAGS)
 
-# Task 2.2: DiskHNSW 测试（可插拔接口 + I/O 模式配置）
-# test_disk_hnsw (Phase 3: with prefetch support)
-$(BUILD_DIR)/test_disk_hnsw: $(SRC_DIR)/test_disk_hnsw.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/predictor.h $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.h $(SRC_DIR)/prefetcher.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/test_disk_hnsw.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.cpp $(LDFLAGS)
+# Task 2.2: DiskHNSW 测试（Phase 3: with graph prefetch support）
+$(BUILD_DIR)/test_disk_hnsw: $(SRC_DIR)/test_disk_hnsw.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/test_disk_hnsw.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
 
 # 验证工具
 $(BUILD_DIR)/verify: $(SRC_DIR)/verify.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
@@ -59,26 +58,38 @@ pipeline: all
 	@echo "=== Phase 1 Pipeline Complete ==="
 
 # Benchmark 1M
-$(BUILD_DIR)/benchmark_1m: $(SRC_DIR)/benchmark_1m.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/common.h | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_1m.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(LDFLAGS)
+$(BUILD_DIR)/benchmark_1m: $(SRC_DIR)/benchmark_1m.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_1m.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
 
-# Phase 3: Markov Predictor
-$(BUILD_DIR)/train_markov: $(SRC_DIR)/train_markov.cpp $(SRC_DIR)/predictor.h $(SRC_DIR)/predictor.cpp | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/train_markov.cpp $(SRC_DIR)/predictor.cpp $(LDFLAGS)
+# Phase 3a: collect traces v2
+$(BUILD_DIR)/collect_traces_v2: $(SRC_DIR)/collect_traces_v2.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/collect_traces_v2.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
 
-# Phase 3: Trace collector
-$(BUILD_DIR)/collect_traces: $(SRC_DIR)/collect_traces.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/predictor.h $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.h $(SRC_DIR)/prefetcher.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/collect_traces.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.cpp $(LDFLAGS)
+# Phase 3a: inter-query prefetch benchmark
+$(BUILD_DIR)/benchmark_interquery: $(SRC_DIR)/benchmark_interquery.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_interquery.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
 
-# Phase 3: test_disk_hnsw (with prefetch support)
-$(BUILD_DIR)/test_disk_hnsw: $(SRC_DIR)/test_disk_hnsw.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/predictor.h $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.h $(SRC_DIR)/prefetcher.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/test_disk_hnsw.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.cpp $(LDFLAGS)
+# Phase 3b: mmap benchmark
+$(BUILD_DIR)/benchmark_mmap: $(SRC_DIR)/benchmark_mmap.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_mmap.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
+
+# O_DIRECT cache sweep benchmark
+$(BUILD_DIR)/benchmark_odirect_sweep: $(SRC_DIR)/benchmark_odirect_sweep.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_odirect_sweep.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
+
+# D4 Prefetch benchmark (OD c1024 + graph prefetch)
+$(BUILD_DIR)/benchmark_d4_prefetch: $(SRC_DIR)/benchmark_d4_prefetch.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_d4_prefetch.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
+
+# Phase 3 Redesign: benchmark_phase3 (O_DIRECT + io_uring + graph prefetch)
+$(BUILD_DIR)/benchmark_phase3: $(SRC_DIR)/benchmark_phase3.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_phase3.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
+
+# Phase 3 v2: cached I/O + fadvise benchmark
+$(BUILD_DIR)/benchmark_fadvise: $(SRC_DIR)/benchmark_fadvise.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_fadvise.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
 
 clean:
 	rm -f $(BUILD_DIR)/*
 
 .PHONY: all pipeline clean
-
-# Phase 3: Benchmark with prefetch
-$(BUILD_DIR)/benchmark_prefetch: $(SRC_DIR)/benchmark_prefetch.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/predictor.h $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.h $(SRC_DIR)/prefetcher.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_prefetch.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/predictor.cpp $(SRC_DIR)/prefetcher.cpp $(LDFLAGS)

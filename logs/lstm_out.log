@@ -1,0 +1,21 @@
+Loading...
+Vocab: 201, Coverage: 45.1%
+Building train data...
+Train: 50000
+Test: 20000
+Training...
+  Ep1: loss=2.9677 Top-1=59.03% Top-10=65.54%
+  Ep2: loss=2.8095 Top-1=59.30% Top-10=65.77%
+  Ep3: loss=2.7826 Top-1=59.56% Top-10=65.82%
+  Ep4: loss=2.7651 Top-1=59.51% Top-10=65.80%
+  Ep5: loss=2.7558 Top-1=59.56% Top-10=65.96%
+
+Block prediction...
+  LSTM 1-step: 9.02% (7837/86883)
+  LSTM 3-step: 17.37%
+  LSTM 5-step: 22.46%
+  LSTM 10-step: 30.98%
+
+=== FINAL ===
+Markov: 1-step=20.83%, 3-step=30.93%, 5-step=35.73%, 10-step=43.22%
+LSTM:   1-step=9.02%

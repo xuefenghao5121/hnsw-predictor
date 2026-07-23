@@ -1,0 +1,137 @@
+=== mmap Benchmark ===
+k=10, ef=50
+
+[1] Loading data...
+  Base: 1000000, Query: 200, dim=128
+  Blocks: 2225
+
+[2] M0: Full-memory...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== M0: Full-mem ===
+  Recall@HNSW:  100%
+  Mean:         5748.14 us (5.74814 ms)
+  P50:          5601.39 us
+  P95:          6992.19 us
+  P99:          7755.95 us
+  QPS:          173.948
+  Cache hit:    100%
+  RSS:          644 MB
+
+[3] M1: c64 pread...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== M1: c64 pread ===
+  Recall@HNSW:  100%
+  Mean:         273558 us (273.558 ms)
+  P50:          269768 us
+  P95:          351969 us
+  P99:          388658 us
+  QPS:          3.65553
+  Cache hit:    35.6753%
+  RSS:          116 MB
+
+[4] M2: c64 mmap...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] mmap'd 583274496 bytes with MADV_RANDOM
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=mmap
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+=== M2: c64 mmap ===
+  Recall@HNSW:  100%
+  Mean:         236082 us (236.082 ms)
+  P50:          230658 us
+  P95:          302103 us
+  P99:          358870 us
+  QPS:          4.23582
+  Cache hit:    35.6753%
+  RSS:          605 MB
+
+[5] M3: c256 mmap...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] mmap'd 583274496 bytes with MADV_RANDOM
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=mmap
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+=== M3: c256 mmap ===
+  Recall@HNSW:  100%
+  Mean:         135876 us (135.876 ms)
+  P50:          134584 us
+  P95:          175385 us
+  P99:          205649 us
+  QPS:          7.35966
+  Cache hit:    65.5252%
+  RSS:          659 MB
+
+[6] M4: c512 mmap...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] mmap'd 583274496 bytes with MADV_RANDOM
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=512, dim=128, layout=bfs, policy=lru, io_mode=mmap
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+=== M4: c512 mmap ===
+  Recall@HNSW:  100%
+  Mean:         62934.7 us (62.9347 ms)
+  P50:          61955.2 us
+  P95:          85264.8 us
+  P99:          102262 us
+  QPS:          15.8895
+  Cache hit:    84.1033%
+  RSS:          731 MB
+
+
+========== mmap Benchmark ==========
+
+| Config | Mean(ms) | P99(ms) | QPS | Hit% | RSS(MB) | R@HNSW |
+|--------|----------|---------|-----|------|---------|--------|
+| M0: Full-mem | 5.75 | 7.76 | 173.9 | 100.0 | 644 | 100.00% |
+| M1: c64 pread | 273.56 | 388.66 | 3.7 | 35.7 | 116 | 100.00% |
+| M2: c64 mmap | 236.08 | 358.87 | 4.2 | 35.7 | 605 | 100.00% |
+| M3: c256 mmap | 135.88 | 205.65 | 7.4 | 65.5 | 659 | 100.00% |
+| M4: c512 mmap | 62.93 | 102.26 | 15.9 | 84.1 | 731 | 100.00% |
+
+Relative to M0 (full-memory):
+| Config | Latency(x) | QPS(%) | RSS(MB) | Mem Saved |
+|--------|-----------|--------|---------|-----------|
+| M0: Full-mem | 1.00x | 100.00% | 644 | 0.00% |
+| M1: c64 pread | 47.59x | 2.10% | 116 | 81.99% |
+| M2: c64 mmap | 41.07x | 2.44% | 605 | 6.06% |
+| M3: c256 mmap | 23.64x | 4.23% | 659 | -2.33% |
+| M4: c512 mmap | 10.95x | 9.13% | 731 | -13.51% |
+
+===================================
+

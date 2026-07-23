@@ -15,8 +15,7 @@
 #include "block_cache.h"
 #include "layout_provider.h"
 #include "replacement_policy.h"
-#include "predictor.h"
-#include "prefetcher.h"
+#include "graph_prefetcher.h"
 
 #include <vector>
 #include <string>
@@ -25,6 +24,8 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <set>
+#include <fcntl.h>
 
 // ============================================================
 // VisitedList: 简单的访问标记数组（不需要池化，每次搜索创建一个）
@@ -99,6 +100,41 @@ public:
     // 重置缓存统计
     void resetCacheStats() { cache_->resetStats(); }
 
+    // 释放 blocks 文件的 page cache (每次查询后调用)
+    void dropPageCache() { cache_->dropPageCache(); }
+
+    // ---- Phase 3a: 查询间预取 ----
+
+    // 记录当前查询访问的所有 unique block IDs
+    // 在搜索过程中通过 trace callback 自动收集
+    void startRecordingBlocks() { recorded_blocks_.clear(); recording_ = true; }
+    void stopRecordingBlocks() { recording_ = false; }
+    const std::set<uint32_t>& getRecordedBlocks() const { return recorded_blocks_; }
+
+    // 预取最近 N 个查询的 Block 并集
+    // 在下一个查询开始前调用
+    // 方式: posix_fadvise(WILLNEED) 预热 page cache, 不进 BlockCache
+    // 返回预取的 block 数
+    size_t prefetchRecentBlocks(const std::vector<std::set<uint32_t>>& recent_sets, size_t n) {
+        std::set<uint32_t> union_set;
+        size_t start = recent_sets.size() > n ? recent_sets.size() - n : 0;
+        for (size_t i = start; i < recent_sets.size(); i++) {
+            union_set.insert(recent_sets[i].begin(), recent_sets[i].end());
+        }
+
+        size_t loaded = 0;
+        int fd = cache_->getBlocksFd();
+        size_t header = cache_->getHeaderSize();
+        uint32_t bs = cache_->getBlockSizeBytes();
+        for (uint32_t block_id : union_set) {
+            // 用 fadvise(WILLNEED) 预热 page cache, 不污染 BlockCache
+            off_t offset = (off_t)header + (off_t)block_id * bs;
+            posix_fadvise(fd, offset, bs, POSIX_FADV_WILLNEED);
+            loaded++;
+        }
+        return loaded;
+    }
+
     // 获取图信息
     uint32_t getNumNodes() const { return graph_.num_nodes; }
     uint32_t getDim() const { return dim_; }
@@ -113,22 +149,23 @@ public:
     uint32_t oldToNew(uint32_t old_id) const { return old_to_new_[old_id]; }
     uint32_t newToOld(uint32_t new_id) const { return new_to_old_[new_id]; }
 
-    // ---- Phase 3: 预取支持 ----
+    // ---- Phase 3 Redesign: 图引导预取支持 ----
 
-    // 启用预取（加载 Markov 模型）
-    void enablePrefetch(const std::string& model_path);
+    // 启用图引导预取（io_uring 异步批量预取）
+    // use_odirect: 是否使用 O_DIRECT 模式
+    void enableGraphPrefetch(bool use_odirect = true);
 
-    // 禁用预取
-    void disablePrefetch();
+    // 禁用图引导预取
+    void disableGraphPrefetch();
 
-    // 是否已启用预取
-    bool isPrefetchEnabled() const { return prefetcher_ != nullptr; }
+    // 是否已启用图引导预取
+    bool isGraphPrefetchEnabled() const { return graph_prefetch_enabled_; }
 
-    // 获取预取统计
-    const Prefetcher::Stats& getPrefetchStats() const;
+    // 获取图引导预取统计
+    const GraphPrefetcher::Stats& getGraphPrefetchStats() const;
 
-    // 重置预取统计
-    void resetPrefetchStats();
+    // 重置图引导预取统计
+    void resetGraphPrefetchStats();
 
     // ---- Phase 3: 轨迹采集 ----
     void setTraceCallback(std::function<void(uint32_t, bool)> cb) { cache_->setTraceCallback(std::move(cb)); }
@@ -150,10 +187,13 @@ private:
     // 缓存配置信息（从 cache_ 获取后保存，用于日志）
     size_t cache_slots_ = 0;
 
-    // ---- Phase 3: 预测器 + 预取器 ----
-    std::unique_ptr<MarkovPredictor> predictor_;
-    std::unique_ptr<Prefetcher> prefetcher_;
-    uint32_t last_accessed_block_ = UINT32_MAX;  // 上次访问的 block_id
+    // ---- Phase 3 Redesign: 图引导预取器 ----
+    std::unique_ptr<GraphPrefetcher> graph_prefetcher_;
+    bool graph_prefetch_enabled_ = false;
+
+    // ---- Phase 3a: 查询间预取 ----
+    bool recording_ = false;
+    std::set<uint32_t> recorded_blocks_;
 
     // ---- 访问标记 ----
     // 每次搜索创建新的VisitedList，不需要线程安全

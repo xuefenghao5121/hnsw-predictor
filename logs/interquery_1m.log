@@ -1,0 +1,171 @@
+=== Inter-Query Prefetch Benchmark ===
+k=10, ef=50
+
+[1] Loading data...
+  Base: 1000000, Query: 200, dim=128
+  Blocks: 2225
+
+[2] G0: Full-memory...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== G0: Full-mem ===
+  Recall@HNSW:  100%
+  Mean:         5887.84 us (5.88784 ms)
+  P50:          5803.08 us
+  P95:          7235.53 us
+  P99:          7697.84 us
+  QPS:          169.825
+  Cache hit:    100%
+  RSS:          644 MB
+  PF window:    0
+  Graph PF:     OFF
+
+[3] G1: c64, no prefetch...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== G1: c64 nopf ===
+  Recall@HNSW:  100%
+  Mean:         270952 us (270.952 ms)
+  P50:          266996 us
+  P95:          351170 us
+  P99:          390033 us
+  QPS:          3.69068
+  Cache hit:    35.6753%
+  RSS:          116 MB
+  PF window:    0
+  Graph PF:     OFF
+
+[4] G2: c64, prefetch(1)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== G2: c64 pf(1) ===
+  Recall@HNSW:  100%
+  Mean:         268135 us (268.135 ms)
+  P50:          260815 us
+  P95:          346373 us
+  P99:          395962 us
+  QPS:          3.72945
+  Cache hit:    35.6753%
+  RSS:          116 MB
+  PF window:    1
+  Graph PF:     OFF
+
+[5] G3: c64, prefetch(5)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== G3: c64 pf(5) ===
+  Recall@HNSW:  100%
+  Mean:         267416 us (267.416 ms)
+  P50:          261202 us
+  P95:          340019 us
+  P99:          389920 us
+  QPS:          3.73948
+  Cache hit:    35.6753%
+  RSS:          116 MB
+  PF window:    5
+  Graph PF:     OFF
+
+[6] G4: c256, prefetch(5)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== G4: c256 pf(5) ===
+  Recall@HNSW:  100%
+  Mean:         152865 us (152.865 ms)
+  P50:          151472 us
+  P95:          202183 us
+  P99:          227735 us
+  QPS:          6.54167
+  Cache hit:    65.5252%
+  RSS:          170 MB
+  PF window:    5
+  Graph PF:     OFF
+
+[7] G5: c64, prefetch(5) + graph pf...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=no, fd=3
+[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=no)
+
+=== G5: c64 pf(5)+gpf ===
+  Recall@HNSW:  100%
+  Mean:         392382 us (392.382 ms)
+  P50:          384947 us
+  P95:          499263 us
+  P99:          567106 us
+  QPS:          2.54853
+  Cache hit:    95.0453%
+  RSS:          124 MB
+  PF window:    5
+  Graph PF:     ON
+
+
+========== Inter-Query Prefetch Benchmark ==========
+
+| Config | Mean(ms) | P99(ms) | QPS | Hit% | RSS(MB) | R@HNSW | PF Win |
+|--------|----------|---------|-----|------|---------|--------|--------|
+| G0: Full-mem | 5.89 | 7.70 | 169.8 | 100.0 | 644 | 100.00% | 0 |
+| G1: c64 nopf | 270.95 | 390.03 | 3.7 | 35.7 | 116 | 100.00% | 0 |
+| G2: c64 pf(1) | 268.14 | 395.96 | 3.7 | 35.7 | 116 | 100.00% | 1 |
+| G3: c64 pf(5) | 267.42 | 389.92 | 3.7 | 35.7 | 116 | 100.00% | 5 |
+| G4: c256 pf(5) | 152.87 | 227.73 | 6.5 | 65.5 | 170 | 100.00% | 5 |
+| G5: c64 pf(5)+gpf | 392.38 | 567.11 | 2.5 | 95.0 | 124 | 100.00% | 5 |
+
+Relative to G0 (full-memory):
+| Config | Latency(x) | QPS(%) | Mem(MB) | Mem Saved |
+|--------|-----------|--------|---------|-----------|
+| G0: Full-mem | 1.00x | 100.00% | 644 | 0.00% |
+| G1: c64 nopf | 46.02x | 2.17% | 116 | 81.99% |
+| G2: c64 pf(1) | 45.54x | 2.20% | 116 | 81.99% |
+| G3: c64 pf(5) | 45.42x | 2.20% | 116 | 81.99% |
+| G4: c256 pf(5) | 25.96x | 3.85% | 170 | 73.60% |
+| G5: c64 pf(5)+gpf | 66.64x | 1.50% | 124 | 80.75% |
+
+====================================================
+

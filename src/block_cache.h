@@ -34,9 +34,11 @@ struct IOConfig {
     bool use_odirect = false;          // 使用 O_DIRECT 打开文件
     bool drop_page_cache = false;      // pread 后用 posix_fadvise 清除 page cache
     double simulated_latency_us = 0.0; // 模拟磁盘延迟（微秒），0 = 不模拟
+    bool use_mmap = false;             // 使用 mmap 映射 blocks 文件
 
     // 获取模式名称
     std::string modeName() const {
+        if (use_mmap) return "mmap";
         if (use_odirect) return "direct";
         if (simulated_latency_us > 0) return "simulated";
         return "cached";
@@ -171,6 +173,38 @@ public:
     // 如果 block 不在缓存，加载到缓存并返回 true，失败返回 false
     bool tryPrefetch(uint32_t block_id);
 
+    // ---- Phase 3 Redesign: io_uring 预取支持 ----
+
+    // 从外部预加载的数据插入缓存（io_uring 完成后调用）
+    // block_id:   Block ID
+    // raw_data:   原始磁盘数据（调用后所有权转移给缓存）
+    // data_size:  数据大小（应等于 block_size_）
+    // 返回 true 表示成功插入
+    bool insertBlock(uint32_t block_id, std::vector<uint8_t>&& raw_data, size_t data_size);
+
+    // 零拷贝插入：直接从对齐缓冲区指针插入
+    // 避免 processCompletion 中的临时 vector 分配 + memcpy
+    // 内部会分配 raw_data 并做一次拷贝（无法避免，因为 CachedBlock 需要 vector）
+    bool insertBlockFromPtr(uint32_t block_id, const void* data, size_t data_size);
+
+    // 获取 Block 文件描述符（io_uring 读取用）
+    int getBlocksFd() const { return blocks_fd_; }
+
+    // 获取 Block 大小（字节）
+    uint32_t getBlockSizeBytes() const { return block_size_; }
+
+    // 获取 Blocks 文件头部大小（用于计算偏移，O_DIRECT 对齐）
+    static constexpr size_t getHeaderSize() { return BLOCKS_FILE_HEADER_SIZE; }
+
+    // 获取当前缓存中 block 数量（不加锁，用于快速检查）
+    size_t getNumCachedBlocksUnsafe() const {
+        return cache_map_.size();
+    }
+
+    // 主动释放 blocks 文件的 page cache (posix_fadvise DONTNEED)
+    // 在每次查询后调用，防止 page cache 无限增长
+    void dropPageCache();
+
     // 获取最近访问的 Block ID（用于预测器推理）
     // 返回最近 N 个被加载的 block_id（按时间顺序）
     std::vector<uint32_t> getRecentBlockAccesses(size_t n = 10) const;
@@ -230,6 +264,10 @@ private:
     IOConfig io_config_;
     void* aligned_buffer_ = nullptr;  // O_DIRECT 用的对齐缓冲区
     size_t aligned_buffer_size_ = 0;
+
+    // ---- mmap 模式 ----
+    void* mmap_ptr_ = nullptr;        // mmap 映射起始地址
+    size_t mmap_size_ = 0;            // mmap 映射大小
 
     // ---- 缓存配置 ----
     size_t cache_slots_;            // 最大缓存槽位数

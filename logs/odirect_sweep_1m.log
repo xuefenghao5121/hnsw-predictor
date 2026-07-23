@@ -1,0 +1,82 @@
+=== O_DIRECT Cache Sweep ===
+
+[1] Loading data...
+  Base: 1000000, Query: 200, dim=128
+  Blocks: 2225, block_size=262144
+
+[2] D0: Full-memory...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+[3] D1: OD c64...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+[4] D2: OD c256...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+[5] D3: OD c512...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=512, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+[6] D4: OD c1024...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=1024, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+========== O_DIRECT Cache Sweep ==========
+
+| Config | Mean(ms) | P99(ms) | QPS | Hit% | RSS(MB) | Cache(MB) | R@HNSW |
+|--------|----------|---------|-----|------|---------|-----------|--------|
+| D0: Full-mem | 5.83 | 7.60 | 171.5 | 100.0 | 644 | 556 | 100.00% |
+| D1: OD c64 | 524.61 | 736.58 | 1.9 | 35.7 | 116 | 16 | 100.00% |
+| D2: OD c256 | 289.91 | 422.49 | 3.4 | 65.5 | 173 | 64 | 100.00% |
+| D3: OD c512 | 137.22 | 222.98 | 7.3 | 84.1 | 242 | 128 | 100.00% |
+| D4: OD c1024 | 34.88 | 56.20 | 28.7 | 96.2 | 384 | 256 | 100.00% |
+
+Relative to D0 (full-memory):
+| Config | Latency(x) | QPS(%) | RSS(MB) | Mem Saved | BW Saved* |
+|--------|-----------|--------|---------|-----------|-----------|
+| D0: Full-mem | 1.00x | 100.00% | 644 | 0.00% | 0.00% |
+| D1: OD c64 | 89.98x | 1.11% | 116 | 81.99% | 81.99% |
+| D2: OD c256 | 49.72x | 2.01% | 173 | 73.14% | 73.14% |
+| D3: OD c512 | 23.54x | 4.25% | 242 | 62.42% | 62.42% |
+| D4: OD c1024 | 5.98x | 16.72% | 384 | 40.37% | 40.37% |
+
+* BW Saved = memory not in DRAM (O_DIRECT blocks not in page cache)
+

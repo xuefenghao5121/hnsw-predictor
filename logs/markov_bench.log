@@ -1,0 +1,204 @@
+=== Markov Prefetch Benchmark ===
+k=10, ef=50
+Markov model: logs/markov_model/markov_model.json
+
+[1] Loading data...
+  Base: 1000000, Query: 100, dim=128
+  Blocks: 2225
+
+[2] E0: Full-memory (cache=2225)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== E0: Full ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         1274.84 us (1.27484 ms)
+  P50:          1235.39 us
+  P95:          1659.95 us
+  P99:          2096.69 us
+  QPS:          784.375
+  Cache hit:    100%
+  RSS:          613 MB
+
+[3] E1: cache=64, no prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+=== E1: c64 ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         504856 us (504.856 ms)
+  P50:          521488 us
+  P95:          702924 us
+  P99:          779470 us
+  QPS:          1.98076
+  Cache hit:    35.9224%
+  RSS:          567 MB
+
+[4] E2: cache=64, Markov prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[MarkovModel] Loaded from logs/markov_model/markov_model.json: vocab=1001, transitions=1001
+[DiskHNSW] Markov prefetch enabled (model=logs/markov_model/markov_model.json, max_prefetch=10, lookahead=10, multi_step=yes)
+
+=== E2: c64+mk ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         568965 us (568.965 ms)
+  P50:          585458 us
+  P95:          826180 us
+  P99:          925211 us
+  QPS:          1.75758
+  Cache hit:    36.2375%
+  RSS:          567 MB
+  Markov:       predictions=5747 prefetched=26801 hit_cache=9982 delta_unk=486
+
+[5] E3: cache=64, graph prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
+
+=== E3: c64+gp ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         190998 us (190.998 ms)
+  P50:          188133 us
+  P95:          305461 us
+  P99:          378576 us
+  QPS:          5.23564
+  Cache hit:    97.5913%
+  RSS:          567 MB
+  Graph PF:     submitted=123511 completed=123511
+
+[6] E4: cache=64, graph + Markov...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
+[MarkovModel] Loaded from logs/markov_model/markov_model.json: vocab=1001, transitions=1001
+[DiskHNSW] Markov prefetch enabled (model=logs/markov_model/markov_model.json, max_prefetch=10, lookahead=10, multi_step=yes)
+
+=== E4: c64+gp+mk ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         306700 us (306.7 ms)
+  P50:          279523 us
+  P95:          466064 us
+  P99:          597629 us
+  QPS:          3.26051
+  Cache hit:    97.0345%
+  RSS:          567 MB
+  Markov:       predictions=5747 prefetched=26811 hit_cache=9955 delta_unk=486
+  Graph PF:     submitted=122856 completed=122856
+
+[7] E5: cache=256, no prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+=== E5: c256 ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         174228 us (174.228 ms)
+  P50:          170611 us
+  P95:          222242 us
+  P99:          240975 us
+  QPS:          5.73958
+  Cache hit:    65.7996%
+  RSS:          567 MB
+
+[8] E6: cache=256, Markov prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[MarkovModel] Loaded from logs/markov_model/markov_model.json: vocab=1001, transitions=1001
+[DiskHNSW] Markov prefetch enabled (model=logs/markov_model/markov_model.json, max_prefetch=10, lookahead=10, multi_step=yes)
+
+=== E6: c256+mk ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         195720 us (195.72 ms)
+  P50:          192553 us
+  P95:          252344 us
+  P99:          282900 us
+  QPS:          5.10933
+  Cache hit:    66.2844%
+  RSS:          567 MB
+  Markov:       predictions=5747 prefetched=12517 hit_cache=25816 delta_unk=486
+
+
+========== Markov Prefetch Benchmark ==========
+
+| Config | Mean(ms) | P99(ms) | QPS | Hit% | RSS(MB) | R@HNSW | PF Mode |
+|--------|----------|---------|-----|------|---------|--------|---------|
+| E0: Full | 1.27 | 2.10 | 784.4 | 100.0 | 613 | 100.00% | none |
+| E1: c64 | 504.86 | 779.47 | 2.0 | 35.9 | 567 | 100.00% | none |
+| E2: c64+mk | 568.97 | 925.21 | 1.8 | 36.2 | 567 | 100.00% | markov |
+| E3: c64+gp | 191.00 | 378.58 | 5.2 | 97.6 | 567 | 100.00% | graph |
+| E4: c64+gp+mk | 306.70 | 597.63 | 3.3 | 97.0 | 567 | 100.00% | graph+markov |
+| E5: c256 | 174.23 | 240.97 | 5.7 | 65.8 | 567 | 100.00% | none |
+| E6: c256+mk | 195.72 | 282.90 | 5.1 | 66.3 | 567 | 100.00% | markov |
+
+Relative to E0 (full-memory):
+| Config | Latency(x) | QPS(%) | Mem(%) | Mem Saved |
+|--------|-----------|--------|--------|-----------|
+| E0: Full | 1.00x | 100.00% | 100.00% | 0.00% |
+| E1: c64 | 396.02x | 0.25% | 92.50% | 7.50% |
+| E2: c64+mk | 446.30x | 0.22% | 92.50% | 7.50% |
+| E3: c64+gp | 149.82x | 0.67% | 92.50% | 7.50% |
+| E4: c64+gp+mk | 240.58x | 0.42% | 92.50% | 7.50% |
+| E5: c256 | 136.67x | 0.73% | 92.50% | 7.50% |
+| E6: c256+mk | 153.53x | 0.65% | 92.50% | 7.50% |
+
+===============================================
+
+JSON saved to logs/markov_benchmark.json

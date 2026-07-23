@@ -1,0 +1,120 @@
+=== cached I/O + fadvise Benchmark ===
+k=10, ef=50
+
+[1] Loading data...
+  Base: 1000000, Query: 100, dim=128
+  base_data freed
+  Blocks: 2225
+
+[2] F0: Full-memory (cache=2225)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== F0: Full-mem ===
+  Recall@HNSW:  100%
+  Mean:         5671.87 us (5.67187 ms)
+  P50:          5529.23 us
+  P95:          6859.72 us
+  P99:          7612.45 us
+  QPS:          176.29
+  Cache hit:    100%
+  RSS:          613 MB
+  Page cache:   0 MB
+  Fadvise:      OFF
+
+[3] F1: cached+fadvise, cache=64...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== F1: c64+fadv ===
+  Recall@HNSW:  100%
+  Mean:         510919 us (510.919 ms)
+  P50:          505513 us
+  P95:          609491 us
+  P99:          635616 us
+  QPS:          1.88542
+  Cache hit:    35.9224%
+  RSS:          115 MB
+  Page cache:   0 MB
+  Fadvise:      ON
+
+[4] F2: cached+fadvise, cache=256...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== F2: c256+fadv ===
+  Recall@HNSW:  100%
+  Mean:         370200 us (370.2 ms)
+  P50:          363895 us
+  P95:          446698 us
+  P99:          492043 us
+  QPS:          2.57006
+  Cache hit:    65.7996%
+  RSS:          169 MB
+  Page cache:   0 MB
+  Fadvise:      ON
+
+[5] F3: cached (no fadvise), cache=64...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== F3: c64+nofadv ===
+  Recall@HNSW:  100%
+  Mean:         264928 us (264.928 ms)
+  P50:          260302 us
+  P95:          325621 us
+  P99:          355178 us
+  QPS:          3.77461
+  Cache hit:    35.9224%
+  RSS:          115 MB
+  Page cache:   0 MB
+  Fadvise:      OFF
+
+
+========== cached I/O + fadvise Benchmark ==========
+
+| Config | Mean(ms) | P99(ms) | QPS | Hit% | RSS(MB) | PageCache(MB) | R@HNSW |
+|--------|----------|---------|-----|------|---------|---------------|--------|
+| F0: Full-mem | 5.67 | 7.61 | 176.3 | 100.0 | 613 | 0 | 100.00% |
+| F1: c64+fadv | 510.92 | 635.62 | 1.9 | 35.9 | 115 | 0 | 100.00% |
+| F2: c256+fadv | 370.20 | 492.04 | 2.6 | 65.8 | 169 | 0 | 100.00% |
+| F3: c64+nofadv | 264.93 | 355.18 | 3.8 | 35.9 | 115 | 0 | 100.00% |
+
+Relative to F0 (full-memory):
+| Config | Latency(x) | QPS(%) | RSS+Cache(MB) | Mem Saved |
+|--------|-----------|--------|--------------|-----------|
+| F0: Full-mem | 1.00x | 100.00% | 613 | 0.00% |
+| F1: c64+fadv | 90.08x | 1.07% | 115 | 81.24% |
+| F2: c256+fadv | 65.27x | 1.46% | 169 | 72.43% |
+| F3: c64+nofadv | 46.71x | 2.14% | 115 | 81.24% |
+
+===================================================
+

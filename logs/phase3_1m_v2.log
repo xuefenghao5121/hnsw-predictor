@@ -1,0 +1,153 @@
+=== Phase 3 Redesign Benchmark ===
+k=10, ef=50
+
+[1] Loading data...
+  Base: 1000000, Query: 100, dim=128
+  base_data freed
+  Blocks: 2225, block_size=262144
+
+[2] E0: Full-memory (cache=2225)...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== E0: Full-mem ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         5770.45 us (5.77045 ms)
+  P50:          5661.22 us
+  P95:          6867.9 us
+  P99:          7335.05 us
+  QPS:          173.279
+  Cache hit:    100%
+  RSS:          613 MB
+
+[3] E1: O_DIRECT, cache=64, no prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+=== E1: OD c64 ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         567715 us (567.715 ms)
+  P50:          553122 us
+  P95:          707888 us
+  P99:          790431 us
+  QPS:          1.76145
+  Cache hit:    34.0751%
+  RSS:          566 MB
+
+[4] E2: O_DIRECT, cache=64, graph prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=64, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
+
+=== E2: OD c64+pf ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         537835 us (537.835 ms)
+  P50:          521476 us
+  P95:          678788 us
+  P99:          733402 us
+  QPS:          1.8593
+  Cache hit:    61.5246%
+  RSS:          566 MB
+  Prefetch:     submitted=122298 completed=122288 skipped=31133 failed=0
+
+[5] E3: O_DIRECT, cache=256, no prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+
+=== E3: OD c256 ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         268006 us (268.006 ms)
+  P50:          259143 us
+  P95:          343773 us
+  P99:          371404 us
+  QPS:          3.73125
+  Cache hit:    65.2958%
+  RSS:          566 MB
+
+[6] E4: O_DIRECT, cache=256, graph prefetch...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=256, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
+
+=== E4: OD c256+pf ===
+  Recall@GT:    32.4%
+  Recall@HNSW:  100%
+  Mean:         331471 us (331.471 ms)
+  P50:          330414 us
+  P95:          424000 us
+  P99:          474720 us
+  QPS:          3.01685
+  Cache hit:    74.373%
+  RSS:          566 MB
+  Prefetch:     submitted=64598 completed=64589 skipped=88833 failed=0
+
+
+========== Phase 3 Redesign Benchmark ==========
+
+| Config | Mean(ms) | P99(ms) | QPS | Hit% | RSS(MB) | R@HNSW | Prefetch |
+|--------|----------|---------|-----|------|---------|--------|----------|
+| E0: Full-mem | 5.77 | 7.34 | 173.3 | 100.0 | 613 | 100.00% | OFF |
+| E1: OD c64 | 567.71 | 790.43 | 1.8 | 34.1 | 566 | 100.00% | OFF |
+| E2: OD c64+pf | 537.84 | 733.40 | 1.9 | 61.5 | 566 | 100.00% | ON |
+| E3: OD c256 | 268.01 | 371.40 | 3.7 | 65.3 | 566 | 100.00% | OFF |
+| E4: OD c256+pf | 331.47 | 474.72 | 3.0 | 74.4 | 566 | 100.00% | ON |
+
+Relative to E0 (full-memory):
+| Config | Latency(x) | QPS(%) | Mem(%) | Mem Saved |
+|--------|-----------|--------|--------|-----------|
+| E0: Full-mem | 1.00x | 100.00% | 100.00% | 0.00% |
+| E1: OD c64 | 98.38x | 1.02% | 92.33% | 7.67% |
+| E2: OD c64+pf | 93.21x | 1.07% | 92.33% | 7.67% |
+| E3: OD c256 | 46.44x | 2.15% | 92.33% | 7.67% |
+| E4: OD c256+pf | 57.44x | 1.74% | 92.33% | 7.67% |
+
+Prefetch effectiveness:
+| Pair | No-PF Mean(ms) | PF Mean(ms) | Speedup | Hit% No-PF | Hit% PF |
+|------|----------------|-------------|---------|------------|---------|
+| E1: OD c64 vs E2: OD c64+pf | 567.71 | 537.84 | 1.06x | 34.08% | 61.52% |
+| E3: OD c256 vs E4: OD c256+pf | 268.01 | 331.47 | 0.81x | 65.30% | 74.37% |
+
+===============================================
+
+JSON saved to logs/phase3_benchmark.json

@@ -135,6 +135,11 @@ int main(int argc, char** argv) {
     fhdr.num_blocks = num_blocks;
     out.write(reinterpret_cast<const char*>(&fhdr), sizeof(BlocksFileHeader));
     
+    // Padding 到 BLOCKS_FILE_HEADER_SIZE (4096 字节，O_DIRECT 对齐)
+    size_t padding = BLOCKS_FILE_HEADER_SIZE - sizeof(BlocksFileHeader);
+    std::vector<char> pad_buf(padding, 0);
+    out.write(pad_buf.data(), padding);
+    
     // 为每个 Block 分配固定大小的 buffer
     std::vector<char> block_buf(block_size, 0);
     
@@ -213,8 +218,8 @@ int main(int argc, char** argv) {
     // 统计
     std::cout << "\n=== Block Writing Statistics ===" << std::endl;
     std::cout << "  Total blocks: " << num_blocks << std::endl;
-    std::cout << "  Total file size: " << (sizeof(BlocksFileHeader) + (size_t)num_blocks * block_size) << " bytes" 
-              << " (" << (sizeof(BlocksFileHeader) + (size_t)num_blocks * block_size) / (1024*1024) << " MB)" << std::endl;
+    std::cout << "  Total file size: " << (BLOCKS_FILE_HEADER_SIZE + (size_t)num_blocks * block_size) << " bytes" 
+              << " (" << (BLOCKS_FILE_HEADER_SIZE + (size_t)num_blocks * block_size) / (1024*1024) << " MB)" << std::endl;
     std::cout << "  Metadata saved to " << meta_path << std::endl;
     std::cout << "Task 1.3 complete." << std::endl;
     return 0;

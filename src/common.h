@@ -25,6 +25,10 @@ static constexpr uint32_t FORMAT_VERSION = 1;
 // 默认 Block 大小: 256KB
 static constexpr uint32_t DEFAULT_BLOCK_SIZE = 256 * 1024;
 
+// Blocks 文件头部保留大小（4096 字节，O_DIRECT 对齐）
+// 实际 BlocksFileHeader 只有 16 字节，但文件中保留 4096 字节
+static constexpr size_t BLOCKS_FILE_HEADER_SIZE = 4096;
+
 // ============================================================
 // graph_structure.bin 格式
 // ============================================================

@@ -1,0 +1,26 @@
+=== Config ===
+  top_k=1000, epochs=10, seq_len=32
+  embed=64, hidden=128, layers=2
+  batch=256, lr=0.003
+  max_train=500000, max_test=100000
+  trace_dir=logs/traces_oracle
+
+=== 1. Loading traces ===
+  Queries: 1000, Deltas: 1764695, Vocab: 1001, Coverage: 88.4%
+  Delta=0: 8.2%
+
+=== 2. Markov 1st order ===
+  Delta: Top-1=16.81%, Top-10=30.54%
+  Markov 1-step: 74.51%
+  Markov 3-step: 76.28%
+  Markov 5-step: 77.98%
+  Markov 10-step: 80.49%
+
+=== 3. Building training data ===
+  Train: 500000
+  Test: 100000
+
+=== 4. LSTM (embed=64, hidden=128, layers=2) ===
+  Parameters: 424,617
+
+=== 5. Training (10 epochs) ===
