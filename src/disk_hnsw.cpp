@@ -14,7 +14,6 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
-#include <immintrin.h>  // AVX2 intrinsics
 
 // ============================================================
 // 构造函数（原始接口，向后兼容）
@@ -126,25 +125,9 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
 // ============================================================
 
 float DiskHNSW::l2Distance(const float* a, const float* b) const {
-    // AVX2 SIMD 优化的 L2 距离计算 (8 floats at a time)
-    // 128 维 = 16 个 AVX2 向量
-    __m256 sum = _mm256_setzero_ps();
-    size_t i = 0;
-    for (; i + 8 <= dim_; i += 8) {
-        __m256 va = _mm256_loadu_ps(a + i);
-        __m256 vb = _mm256_loadu_ps(b + i);
-        __m256 diff = _mm256_sub_ps(va, vb);
-        sum = _mm256_fmadd_ps(diff, diff, sum);  // sum += diff * diff
-    }
-    // 水平求和
-    __m128 lo = _mm256_castps256_ps128(sum);
-    __m128 hi = _mm256_extractf128_ps(sum, 1);
-    __m128 s = _mm_add_ps(lo, hi);
-    s = _mm_hadd_ps(s, s);
-    s = _mm_hadd_ps(s, s);
-    float result = _mm_cvtss_f32(s);
-    // 处理剩余元素
-    for (; i < dim_; i++) {
+    // 标量 L2 距离计算（不优化，保持与 hnswlib 一致，作为公平对比基线）
+    float result = 0.0f;
+    for (size_t i = 0; i < dim_; i++) {
         float t = a[i] - b[i];
         result += t * t;
     }
