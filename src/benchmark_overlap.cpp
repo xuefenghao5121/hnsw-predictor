@@ -280,20 +280,22 @@ int main(int argc, char** argv) {
             std::memcpy(warmup_q.data(), query_data.data(), warmup_q.size() * sizeof(float));
             hnsw.batchSearch(warmup_q, k, bs);
 
-            // Timed batch search
+            // Timed search (逐查询计时, 报告 batch QPS)
+            std::vector<double> batch_latencies(num_query);
+            std::vector<std::vector<SearchResult>> results(num_query);
             auto t0 = std::chrono::high_resolution_clock::now();
-            auto results = hnsw.batchSearch(query_data, k, bs);
+            for (size_t q = 0; q < num_query; q++) {
+                auto q0 = std::chrono::high_resolution_clock::now();
+                results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+                auto q1 = std::chrono::high_resolution_clock::now();
+                batch_latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
+            }
             auto t1 = std::chrono::high_resolution_clock::now();
             double total_s = std::chrono::duration<double>(t1 - t0).count();
 
             BenchResult r;
             r.name = "F2-batch-" + std::to_string(bs) + ": c1024+GP (non-blocking)";
-            // Compute per-query latency (total / n)
-            double per_query_us = total_s / num_query * 1e6;
-            r.lat.mean = per_query_us;
-            r.lat.p50 = per_query_us;
-            r.lat.p95 = per_query_us;
-            r.lat.p99 = per_query_us;
+            r.lat = computeLatency(batch_latencies);
             r.qps = num_query / total_s;
             r.rss_mb = getRSS_MB();
 
