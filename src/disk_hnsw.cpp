@@ -301,7 +301,7 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         // 复制邻居ID到本地缓冲区（因为后续操作可能导致 block 被淘汰）
         std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
-        // ---- 提交预取 (1-hop) ----
+        // ---- 提交预取 (1-hop, 热度引导) ----
         if (graph_prefetch_enabled_ && graph_prefetcher_) {
             std::vector<uint32_t> prefetch_blocks;
             for (uint32_t nid : local_neighbors) {
@@ -314,6 +314,20 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
             prefetch_blocks.erase(
                 std::unique(prefetch_blocks.begin(), prefetch_blocks.end()),
                 prefetch_blocks.end());
+
+            // 热度过滤: 跳过冷 block (heat < threshold)
+            // 冷启动 (查询<5次) 不过滤, 等同当前行为
+            if (heat_evaluator_ && heat_evaluator_->getQueryCount() > 5) {
+                float threshold = heat_evaluator_->getMedianHeat() * 0.3f;
+                std::vector<uint32_t> hot_blocks;
+                for (uint32_t bid : prefetch_blocks) {
+                    if (heat_evaluator_->getHeat(bid) >= threshold) {
+                        hot_blocks.push_back(bid);
+                    }
+                }
+                prefetch_blocks = std::move(hot_blocks);
+            }
+
             if (!prefetch_blocks.empty()) {
                 graph_prefetcher_->submitPrefetch(prefetch_blocks, true);
             }
