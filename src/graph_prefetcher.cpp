@@ -49,7 +49,9 @@ int GraphPrefetcher::submitPrefetch(const std::vector<uint32_t>& block_ids, bool
             reapCompletions();
             buf_idx = ring_.allocBuffer();
             if (buf_idx < 0) {
-                // 仍然没有，跳过这个 block
+                // 仍然没有，回退到同步加载（不静默跳过）
+                cache_->getBlockById(block_id);
+                stats_.prefetch_skipped++;
                 continue;
             }
         }
@@ -279,51 +281,20 @@ void GraphPrefetcher::processCompletion(uint64_t user_data, int32_t res) {
     int buf_idx = it->second;
     pending_requests_.erase(it);
 
-    // 零拷贝插入: 从对齐缓冲区直接插入缓存
-    void* buf = ring_.getBuffer(buf_idx);
-    if (buf) {
-        cache_->insertBlockFromPtr(block_id, buf, block_size_);
-        stats_.prefetch_completed++;
-    }
-    ring_.freeBuffer(buf_idx);
-    completed_blocks_.insert(block_id);
-}
-
-void GraphPrefetcher::waitForAnyBlock(const std::set<uint32_t>& needed_blocks) {
-    auto t0 = std::chrono::high_resolution_clock::now();
-
-    // 筛选出仍在 pending 中的 block
-    std::set<uint32_t> pending;
-    for (uint32_t id : needed_blocks) {
-        if (!cache_->isInCache(id) && pending_requests_.count((uint64_t)id)) {
-            pending.insert(id);
-        }
-    }
-
-    if (pending.empty()) {
+    if (res < 0 || (size_t)res < block_size_) {
+        // 读取失败
+        ring_.freeBuffer(buf_idx);
+        stats_.prefetch_failed++;
         return;
     }
 
-    // 非阻塞 reap 一次
-    reapCompletions();
+    // 零拷贝优化: 直接从 io_uring 对齐缓冲区插入 BlockCache
+    // 避免了临时 vector<uint8_t> 的分配 + memcpy (Opt 3)
+    void* buf = ring_.getBuffer(buf_idx);
+    cache_->insertBlockFromPtr(block_id, buf, block_size_);
 
-    // 检查是否有已完成的
-    for (auto it = pending.begin(); it != pending.end();) {
-        if (cache_->isInCache(*it) || !pending_requests_.count((uint64_t)*it)) {
-            it = pending.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    // 释放缓冲区回池
+    ring_.freeBuffer(buf_idx);
 
-    // 如果还有 pending，等一次 completion
-    if (!pending.empty() && ring_.inflight() > 0) {
-        ring_.waitCompletion();
-        stats_.wait_calls++;
-        reapCompletions();
-    }
-
-    auto t1 = std::chrono::high_resolution_clock::now();
-    stats_.total_wait_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
+    stats_.prefetch_completed++;
 }
-

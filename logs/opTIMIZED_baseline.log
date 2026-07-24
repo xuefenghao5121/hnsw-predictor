@@ -26,11 +26,11 @@ Blocks: 2225, block_size=262144
 
 === F0: Full-mem ===
   Recall@HNSW:  100%
-  Mean:         2.43086 ms
-  P50:          2.11441 ms
-  P95:          4.91818 ms
-  P99:          6.96152 ms
-  QPS:          411.33
+  Mean:         2.1024 ms
+  P50:          1.82117 ms
+  P95:          4.1877 ms
+  P99:          6.56268 ms
+  QPS:          475.572
   Cache hit:    99.3351%
   RSS:          664 MB
 
@@ -44,19 +44,19 @@ Blocks: 2225, block_size=262144
 [DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
 [DiskHNSW] BFS mapping loaded: 1000000 entries
 [DiskHNSW] BlockCache (pluggable) initialized
-[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[GraphPrefetcher] Initialized: ring_size=512, block_size=262144, odirect=yes, fd=3
 [DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
 
 === F2-single: c1024+GP (blocking) ===
-  Recall@HNSW:  100%
-  Mean:         48.8436 ms
-  P50:          46.94 ms
-  P95:          73.437 ms
-  P99:          85.6902 ms
-  QPS:          20.4734
-  Cache hit:    86.841%
-  RSS:          380 MB
-  Graph PF:     submitted=48873 skipped=235287 failed=0
+  Recall@HNSW:  18.3%
+  Mean:         2.67723 ms
+  P50:          2.44822 ms
+  P95:          5.10166 ms
+  P99:          6.66611 ms
+  QPS:          373.507
+  Cache hit:    99.6744%
+  RSS:          331 MB
+  Graph PF:     submitted=801 skipped=102874 failed=0
 
 [F2-batch-4] c1024+GP, batch non-blocking (bs=4)...
 [BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
@@ -68,19 +68,19 @@ Blocks: 2225, block_size=262144
 [DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
 [DiskHNSW] BFS mapping loaded: 1000000 entries
 [DiskHNSW] BlockCache (pluggable) initialized
-[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[GraphPrefetcher] Initialized: ring_size=512, block_size=262144, odirect=yes, fd=3
 [DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
 
 === F2-batch-4: c1024+GP (non-blocking) ===
-  Recall@HNSW:  100%
-  Mean:         52.8718 ms
-  P50:          52.8718 ms
-  P95:          52.8718 ms
-  P99:          52.8718 ms
-  QPS:          18.9137
-  Cache hit:    86.841%
-  RSS:          380 MB
-  Graph PF:     submitted=48873 skipped=235287 failed=0
+  Recall@HNSW:  18.3%
+  Mean:         2.75287 ms
+  P50:          2.75287 ms
+  P95:          2.75287 ms
+  P99:          2.75287 ms
+  QPS:          363.257
+  Cache hit:    99.6744%
+  RSS:          331 MB
+  Graph PF:     submitted=801 skipped=102874 failed=0
 
 [F2-batch-8] c1024+GP, batch non-blocking (bs=8)...
 [BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
@@ -92,19 +92,19 @@ Blocks: 2225, block_size=262144
 [DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
 [DiskHNSW] BFS mapping loaded: 1000000 entries
 [DiskHNSW] BlockCache (pluggable) initialized
-[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[GraphPrefetcher] Initialized: ring_size=512, block_size=262144, odirect=yes, fd=3
 [DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
 
 === F2-batch-8: c1024+GP (non-blocking) ===
-  Recall@HNSW:  100%
-  Mean:         53.722 ms
-  P50:          53.722 ms
-  P95:          53.722 ms
-  P99:          53.722 ms
-  QPS:          18.6144
-  Cache hit:    86.841%
-  RSS:          379 MB
-  Graph PF:     submitted=48873 skipped=235287 failed=0
+  Recall@HNSW:  18.3%
+  Mean:         2.86802 ms
+  P50:          2.86802 ms
+  P95:          2.86802 ms
+  P99:          2.86802 ms
+  QPS:          348.672
+  Cache hit:    99.6744%
+  RSS:          331 MB
+  Graph PF:     submitted=801 skipped=102874 failed=0
 
 [F2-batch-16] c1024+GP, batch non-blocking (bs=16)...
 [BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
@@ -116,26 +116,26 @@ Blocks: 2225, block_size=262144
 [DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
 [DiskHNSW] BFS mapping loaded: 1000000 entries
 [DiskHNSW] BlockCache (pluggable) initialized
-[GraphPrefetcher] Initialized: ring_size=128, block_size=262144, odirect=yes, fd=3
+[GraphPrefetcher] Initialized: ring_size=512, block_size=262144, odirect=yes, fd=3
 [DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
 
 === F2-batch-16: c1024+GP (non-blocking) ===
-  Recall@HNSW:  100%
-  Mean:         53.5039 ms
-  P50:          53.5039 ms
-  P95:          53.5039 ms
-  P99:          53.5039 ms
-  QPS:          18.6902
-  Cache hit:    86.841%
-  RSS:          379 MB
-  Graph PF:     submitted=48873 skipped=235287 failed=0
+  Recall@HNSW:  18.3%
+  Mean:         3.63427 ms
+  P50:          3.63427 ms
+  P95:          3.63427 ms
+  P99:          3.63427 ms
+  QPS:          275.159
+  Cache hit:    99.6744%
+  RSS:          331 MB
+  Graph PF:     submitted=801 skipped=102874 failed=0
 
 
 === SUMMARY ===
 | Config | Mean(ms) | P99(ms) | QPS | Hit% | R@HNSW | PF_sub | PF_skip | PF_fail |
 |--------|----------|---------|-----|------|--------|-------------|------------|
-| F0: Full-mem | 2.43086 | 6.96152 | 411.33 | 99.3351 | 100 | 0 | 0 | 0 |
-| F2-single: c1024+GP (blocking) | 48.8436 | 85.6902 | 20.4734 | 86.841 | 100 | 48873 | 235287 | 0 |
-| F2-batch-4: c1024+GP (non-blocking) | 52.8718 | 52.8718 | 18.9137 | 86.841 | 100 | 48873 | 235287 | 0 |
-| F2-batch-8: c1024+GP (non-blocking) | 53.722 | 53.722 | 18.6144 | 86.841 | 100 | 48873 | 235287 | 0 |
-| F2-batch-16: c1024+GP (non-blocking) | 53.5039 | 53.5039 | 18.6902 | 86.841 | 100 | 48873 | 235287 | 0 |
+| F0: Full-mem | 2.1024 | 6.56268 | 475.572 | 99.3351 | 100 | 0 | 0 | 0 |
+| F2-single: c1024+GP (blocking) | 2.67723 | 6.66611 | 373.507 | 99.6744 | 18.3 | 801 | 102874 | 0 |
+| F2-batch-4: c1024+GP (non-blocking) | 2.75287 | 2.75287 | 363.257 | 99.6744 | 18.3 | 801 | 102874 | 0 |
+| F2-batch-8: c1024+GP (non-blocking) | 2.86802 | 2.86802 | 348.672 | 99.6744 | 18.3 | 801 | 102874 | 0 |
+| F2-batch-16: c1024+GP (non-blocking) | 3.63427 | 3.63427 | 275.159 | 99.6744 | 18.3 | 801 | 102874 | 0 |

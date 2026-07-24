@@ -740,7 +740,7 @@ DiskHNSW::batchSearch(const std::vector<float>& queries, size_t k, size_t batch_
 // ============================================================
 
 void DiskHNSW::enableGraphPrefetch(bool use_odirect) {
-    graph_prefetcher_ = std::make_unique<GraphPrefetcher>(cache_.get(), 128, use_odirect);
+    graph_prefetcher_ = std::make_unique<GraphPrefetcher>(cache_.get(), 512, use_odirect);
     graph_prefetch_enabled_ = true;
 
     // 缓存路由表指针，避免虚函数调用开销

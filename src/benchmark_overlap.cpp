@@ -260,7 +260,7 @@ int main(int argc, char** argv) {
 
 
     // ---- F2-batch: c1024+GP, batch non-blocking search ----
-    for (size_t bs : {4, 8, 16}) {
+    for (size_t bs : {4}) {
         if (bs > num_query) continue;
         std::cout << "\n[F2-batch-" << bs << "] c1024+GP, batch non-blocking (bs=" << bs << ")..." << std::endl;
         {

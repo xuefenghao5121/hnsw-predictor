@@ -26,11 +26,11 @@ Blocks: 2225, block_size=262144
 
 === F0: Full-mem ===
   Recall@HNSW:  100%
-  Mean:         2.43086 ms
-  P50:          2.11441 ms
-  P95:          4.91818 ms
-  P99:          6.96152 ms
-  QPS:          411.33
+  Mean:         2.31009 ms
+  P50:          2.02679 ms
+  P95:          4.65584 ms
+  P99:          6.80366 ms
+  QPS:          432.853
   Cache hit:    99.3351%
   RSS:          664 MB
 
@@ -49,13 +49,13 @@ Blocks: 2225, block_size=262144
 
 === F2-single: c1024+GP (blocking) ===
   Recall@HNSW:  100%
-  Mean:         48.8436 ms
-  P50:          46.94 ms
-  P95:          73.437 ms
-  P99:          85.6902 ms
-  QPS:          20.4734
+  Mean:         40.6176 ms
+  P50:          39.8727 ms
+  P95:          58.5489 ms
+  P99:          67.527 ms
+  QPS:          24.6197
   Cache hit:    86.841%
-  RSS:          380 MB
+  RSS:          379 MB
   Graph PF:     submitted=48873 skipped=235287 failed=0
 
 [F2-batch-4] c1024+GP, batch non-blocking (bs=4)...
@@ -73,13 +73,13 @@ Blocks: 2225, block_size=262144
 
 === F2-batch-4: c1024+GP (non-blocking) ===
   Recall@HNSW:  100%
-  Mean:         52.8718 ms
-  P50:          52.8718 ms
-  P95:          52.8718 ms
-  P99:          52.8718 ms
-  QPS:          18.9137
+  Mean:         42.1826 ms
+  P50:          42.1826 ms
+  P95:          42.1826 ms
+  P99:          42.1826 ms
+  QPS:          23.7064
   Cache hit:    86.841%
-  RSS:          380 MB
+  RSS:          379 MB
   Graph PF:     submitted=48873 skipped=235287 failed=0
 
 [F2-batch-8] c1024+GP, batch non-blocking (bs=8)...
@@ -97,11 +97,11 @@ Blocks: 2225, block_size=262144
 
 === F2-batch-8: c1024+GP (non-blocking) ===
   Recall@HNSW:  100%
-  Mean:         53.722 ms
-  P50:          53.722 ms
-  P95:          53.722 ms
-  P99:          53.722 ms
-  QPS:          18.6144
+  Mean:         43.2231 ms
+  P50:          43.2231 ms
+  P95:          43.2231 ms
+  P99:          43.2231 ms
+  QPS:          23.1358
   Cache hit:    86.841%
   RSS:          379 MB
   Graph PF:     submitted=48873 skipped=235287 failed=0
@@ -121,11 +121,11 @@ Blocks: 2225, block_size=262144
 
 === F2-batch-16: c1024+GP (non-blocking) ===
   Recall@HNSW:  100%
-  Mean:         53.5039 ms
-  P50:          53.5039 ms
-  P95:          53.5039 ms
-  P99:          53.5039 ms
-  QPS:          18.6902
+  Mean:         51.6926 ms
+  P50:          51.6926 ms
+  P95:          51.6926 ms
+  P99:          51.6926 ms
+  QPS:          19.3451
   Cache hit:    86.841%
   RSS:          379 MB
   Graph PF:     submitted=48873 skipped=235287 failed=0
@@ -134,8 +134,8 @@ Blocks: 2225, block_size=262144
 === SUMMARY ===
 | Config | Mean(ms) | P99(ms) | QPS | Hit% | R@HNSW | PF_sub | PF_skip | PF_fail |
 |--------|----------|---------|-----|------|--------|-------------|------------|
-| F0: Full-mem | 2.43086 | 6.96152 | 411.33 | 99.3351 | 100 | 0 | 0 | 0 |
-| F2-single: c1024+GP (blocking) | 48.8436 | 85.6902 | 20.4734 | 86.841 | 100 | 48873 | 235287 | 0 |
-| F2-batch-4: c1024+GP (non-blocking) | 52.8718 | 52.8718 | 18.9137 | 86.841 | 100 | 48873 | 235287 | 0 |
-| F2-batch-8: c1024+GP (non-blocking) | 53.722 | 53.722 | 18.6144 | 86.841 | 100 | 48873 | 235287 | 0 |
-| F2-batch-16: c1024+GP (non-blocking) | 53.5039 | 53.5039 | 18.6902 | 86.841 | 100 | 48873 | 235287 | 0 |
+| F0: Full-mem | 2.31009 | 6.80366 | 432.853 | 99.3351 | 100 | 0 | 0 | 0 |
+| F2-single: c1024+GP (blocking) | 40.6176 | 67.527 | 24.6197 | 86.841 | 100 | 48873 | 235287 | 0 |
+| F2-batch-4: c1024+GP (non-blocking) | 42.1826 | 42.1826 | 23.7064 | 86.841 | 100 | 48873 | 235287 | 0 |
+| F2-batch-8: c1024+GP (non-blocking) | 43.2231 | 43.2231 | 23.1358 | 86.841 | 100 | 48873 | 235287 | 0 |
+| F2-batch-16: c1024+GP (non-blocking) | 51.6926 | 51.6926 | 19.3451 | 86.841 | 100 | 48873 | 235287 | 0 |
