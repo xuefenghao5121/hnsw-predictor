@@ -89,6 +89,10 @@ $(BUILD_DIR)/benchmark_phase3: $(SRC_DIR)/benchmark_phase3.cpp $(SRC_DIR)/disk_h
 $(BUILD_DIR)/benchmark_fadvise: $(SRC_DIR)/benchmark_fadvise.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_fadvise.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
 
+# Full benchmark (multi-config, multi-queryset)
+$(BUILD_DIR)/benchmark_full: $(SRC_DIR)/benchmark_full.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_full.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
+
 clean:
 	rm -f $(BUILD_DIR)/*
 
