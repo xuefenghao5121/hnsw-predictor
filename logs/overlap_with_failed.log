@@ -26,11 +26,11 @@ Blocks: 2225, block_size=262144
 
 === F0: Full-mem ===
   Recall@HNSW:  100%
-  Mean:         2.19259 ms
-  P50:          1.91302 ms
-  P95:          4.27135 ms
-  P99:          6.62138 ms
-  QPS:          456.051
+  Mean:         2.11807 ms
+  P50:          1.84324 ms
+  P95:          4.17716 ms
+  P99:          6.6858 ms
+  QPS:          472.078
   Cache hit:    99.3351%
   RSS:          664 MB
 
@@ -49,13 +49,13 @@ Blocks: 2225, block_size=262144
 
 === F2-single: c1024+GP (blocking) ===
   Recall@HNSW:  100%
-  Mean:         41.4403 ms
-  P50:          39.9628 ms
-  P95:          58.5527 ms
-  P99:          71.07 ms
-  QPS:          24.131
+  Mean:         43.2348 ms
+  P50:          41.7766 ms
+  P95:          61.6599 ms
+  P99:          72.8306 ms
+  QPS:          23.1294
   Cache hit:    86.841%
-  RSS:          379 MB
+  RSS:          380 MB
   Graph PF:     submitted=48873 skipped=235287 failed=0
 
 [F2-batch-4] c1024+GP, batch non-blocking (bs=4)...

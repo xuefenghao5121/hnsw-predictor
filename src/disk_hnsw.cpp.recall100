@@ -485,8 +485,13 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
             CachedBlock* candidateBlock = cache_->getCachedBlockById(curr_block_id);
 
             if (!candidateBlock) {
-                // 候选 block miss: 同步加载 (避免 io_uring 死锁)
-                cache_->getBlockById(curr_block_id);
+                // 候选节点的 block 不在缓存 -> 同步等待 (等价于阻塞版回退路径)
+                if (graph_prefetch_enabled_ && graph_prefetcher_) {
+                    std::vector<uint32_t> pf = {curr_block_id};
+                    graph_prefetcher_->submitPrefetch(pf, true);
+                    std::set<uint32_t> needed; needed.insert(curr_block_id);
+                    graph_prefetcher_->waitForBlocks(needed);
+                }
                 candidateBlock = cache_->getCachedBlockById(curr_block_id);
                 if (!candidateBlock) continue;
                 // 继续处理 (和阻塞版一样)
@@ -565,7 +570,7 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
                     if (vec) {
                         float dist = l2Distance(query, vec);
                         // 用 savedLowerBound (等价于阻塞版: 等待期间 lowerBound 不变)
-                        if (top_candidates.size() < ef || lowerBound > dist) {
+                        if (top_candidates.size() < ef || item.savedLowerBound > dist) {
                             candidate_set.emplace(dist, item.nodeId);
                             top_candidates.emplace(dist, item.nodeId);
                             if (top_candidates.size() > ef) top_candidates.pop();
@@ -603,17 +608,17 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
                 graph_prefetcher_->submitPrefetch(need_prefetch, true);
             }
 
-            // 同步加载第一个 deferred block (避免 io_uring waitForAnyBlock 死锁)
-            if (!deferred.empty()) {
-                cache_->getBlockById(deferred.front().blockId);
-            }
+            // 等待任意一个 block 就绪
+            std::set<uint32_t> needed_blocks;
+            for (const auto& item : deferred) needed_blocks.insert(item.blockId);
+            graph_prefetcher_->waitForAnyBlock(needed_blocks);
         } else {
             // 无预取器: 同步加载 (回退)
             for (const auto& item : deferred) {
                 const float* vec = cache_->getNodeVector(item.nodeId);
                 if (!vec) continue;
                 float dist = l2Distance(query, vec);
-                if (top_candidates.size() < ef || lowerBound > dist) {
+                if (top_candidates.size() < ef || item.savedLowerBound > dist) {
                     candidate_set.emplace(dist, item.nodeId);
                     top_candidates.emplace(dist, item.nodeId);
                     if (top_candidates.size() > ef) top_candidates.pop();
