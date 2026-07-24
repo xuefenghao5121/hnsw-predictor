@@ -1,0 +1,91 @@
+=== I/O Overlap Benchmark ===
+k=10, ef=50, num_queries=200
+Blocks: 2225, block_size=262144
+
+[1] Building HNSW baseline...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+[F0] Full-memory...
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] Initializing BlockCache...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=2225, dim=128, layout=bfs, policy=lru, io_mode=cached
+
+=== F0: Full-mem ===
+  Recall@HNSW:  100%
+  Mean:         2.1559 ms
+  P50:          1.88408 ms
+  P95:          4.26378 ms
+  P99:          6.66408 ms
+  QPS:          463.767
+  Cache hit:    99.3351%
+  RSS:          664 MB
+
+[F2-single] c1024+GP, blocking search...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=1024, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[GraphPrefetcher] Initialized: ring_size=512, block_size=262144, odirect=yes, fd=3
+[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
+
+=== F2-single: c1024+GP (blocking) ===
+  Recall@HNSW:  100%
+  Mean:         40.4637 ms
+  P50:          39.4327 ms
+  P95:          56.9455 ms
+  P99:          67.6612 ms
+  QPS:          24.7134
+  Cache hit:    86.841%
+  RSS:          380 MB
+  Graph PF:     submitted=48873 skipped=235287 failed=0
+
+[F2-batch-4] c1024+GP, batch non-blocking (bs=4)...
+[BfsLayoutProvider] Loaded route table: 1000000 entries, 2225 blocks
+[BlockCache] Initialized: block_size=262144, num_blocks=2225, cache_slots=1024, dim=128, layout=bfs, policy=lru, io_mode=direct
+[DiskHNSW] Loading graph structure (slim) from output/test1m_graph.bin...
+  [slim] Loading vectors for 63002 upper-layer nodes (30MB, skipping 488MB)
+  [slim] Loaded graph structure from output/test1m_graph.bin (1000000 nodes, 63002 upper)
+[DiskHNSW] Graph: 1000000 nodes, dim=128, max_level=5, entry_point=572119
+[DiskHNSW] Loading BFS order from output/test1m_bfs.bin...
+[DiskHNSW] BFS mapping loaded: 1000000 entries
+[DiskHNSW] BlockCache (pluggable) initialized
+[GraphPrefetcher] Initialized: ring_size=512, block_size=262144, odirect=yes, fd=3
+[DiskHNSW] Graph-guided prefetch enabled (io_uring, odirect=yes)
+
+=== F2-batch-4: c1024+GP (non-blocking) ===
+  Recall@HNSW:  100%
+  Mean:         42.1859 ms
+  P50:          40.2575 ms
+  P95:          60.6679 ms
+  P99:          67.8624 ms
+  QPS:          23.7045
+  Cache hit:    86.841%
+  RSS:          380 MB
+  Graph PF:     submitted=48873 skipped=235287 failed=0
+
+
+=== SUMMARY ===
+| Config | Mean(ms) | P99(ms) | QPS | Hit% | R@HNSW | PF_sub | PF_skip | PF_fail |
+|--------|----------|---------|-----|------|--------|-------------|------------|
+| F0: Full-mem | 2.1559 | 6.66408 | 463.767 | 99.3351 | 100 | 0 | 0 | 0 |
+| F2-single: c1024+GP (blocking) | 40.4637 | 67.6612 | 24.7134 | 86.841 | 100 | 48873 | 235287 | 0 |
+| F2-batch-4: c1024+GP (non-blocking) | 42.1859 | 67.8624 | 23.7045 | 86.841 | 100 | 48873 | 235287 | 0 |
