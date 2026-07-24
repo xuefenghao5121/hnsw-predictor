@@ -38,6 +38,10 @@ public:
         double total_submit_us = 0;      // submit 总耗时
         double total_reap_us = 0;        // reap 总耗时
         double total_wait_us = 0;        // wait 总耗时
+        // ---- 时效性指标（搜索需要 block 时它处于何种状态）----
+        size_t need_timely = 0;          // 需要时已在缓存 -> 预取完全藏住延迟
+        size_t need_inflight = 0;        // 不在缓存但在途 pending -> 已提交未到，得等
+        size_t need_not_prefetched = 0;  // 不在缓存也不在途 -> 预取未覆盖，同步加载
     };
 
     // 构造函数
@@ -45,7 +49,7 @@ public:
     // ring_size:  io_uring SQ 大小（默认 128）
     // use_odirect: 是否使用 O_DIRECT（需 cache 的 fd 也是 O_DIRECT 打开的）
     GraphPrefetcher(BlockCache* cache, unsigned ring_size = 128, bool use_odirect = true);
-    ~GraphPrefetcher() = default;
+    ~GraphPrefetcher();
 
     // 非拷贝
     GraphPrefetcher(const GraphPrefetcher&) = delete;

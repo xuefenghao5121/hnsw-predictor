@@ -25,6 +25,23 @@ GraphPrefetcher::GraphPrefetcher(BlockCache* cache, unsigned ring_size, bool use
               << ", fd=" << blocks_fd_ << std::endl;
 }
 
+GraphPrefetcher::~GraphPrefetcher() {
+    // 时效性报告: 搜索需要 block 时它处于何种状态
+    size_t t = stats_.need_timely;
+    size_t f = stats_.need_inflight;
+    size_t n = stats_.need_not_prefetched;
+    size_t tot = t + f + n;
+    if (tot > 0) {
+        std::cerr << "[Prefetch Timeliness] need_total=" << tot
+                  << " timely=" << t << "(" << (100.0*t/tot) << "%)"
+                  << " inflight=" << f << "(" << (100.0*f/tot) << "%)"
+                  << " not_prefetched=" << n << "(" << (100.0*n/tot) << "%)"
+                  << " | wait_calls=" << stats_.wait_calls
+                  << " total_wait_us=" << stats_.total_wait_us
+                  << std::endl;
+    }
+}
+
 int GraphPrefetcher::submitPrefetch(const std::vector<uint32_t>& block_ids, bool auto_submit) {
     if (block_ids.empty()) return 0;
 
@@ -230,8 +247,16 @@ void GraphPrefetcher::waitForBlocks(const std::set<uint32_t>& needed_blocks) {
     // 筛选出仍在 pending 中的 block
     std::set<uint32_t> pending;
     for (uint32_t id : needed_blocks) {
-        if (!cache_->isInCache(id) && pending_requests_.count((uint64_t)id)) {
+        bool in_cache = cache_->isInCache(id);
+        bool in_flight = pending_requests_.count((uint64_t)id) > 0;
+        // 时效性分类（搜索需要此 block 时的状态）
+        if (in_cache) {
+            stats_.need_timely++;           // 预取已到位, 完全藏住
+        } else if (in_flight) {
+            stats_.need_inflight++;         // 预取在途, 得等
             pending.insert(id);
+        } else {
+            stats_.need_not_prefetched++;   // 未预取, 纯同步 miss
         }
     }
 
