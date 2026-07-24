@@ -229,6 +229,8 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         // ---- 优化：直接获取 CachedBlock，避免后续多次锁 + 路由查找 ----
         uint32_t curr_block_id = getBlockIdFast(candidateId);
         CachedBlock* candidateBlock = cache_->getCachedBlockById(curr_block_id);
+        // 更新 block 热度
+        if (heat_evaluator_) heat_evaluator_->onBlockAccess(curr_block_id);
         if (!candidateBlock) {
             // 块不在缓存中（可能被淘汰），回退到 getNodeNeighbors
             uint32_t neighborCount = 0;
@@ -642,6 +644,9 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
     std::vector<SearchResult> result;
     if (graph_.num_nodes == 0) return result;
 
+    // 热度评价器: 查询开始
+    if (heat_evaluator_) heat_evaluator_->onQueryStart();
+
     // Phase 1: 贪心下降（内存中的上层图，old_id空间）
     uint32_t entryOldId = greedyDescent(query);
 
@@ -671,6 +676,9 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
 
         result.emplace_back(dist, label);
     }
+
+    // 热度评价器: 查询结束
+    if (heat_evaluator_) heat_evaluator_->onQueryEnd();
 
     return result;
 }
@@ -742,6 +750,9 @@ DiskHNSW::batchSearch(const std::vector<float>& queries, size_t k, size_t batch_
 void DiskHNSW::enableGraphPrefetch(bool use_odirect) {
     graph_prefetcher_ = std::make_unique<GraphPrefetcher>(cache_.get(), 512, use_odirect);
     graph_prefetch_enabled_ = true;
+
+    // 初始化热度评价器
+    heat_evaluator_ = std::make_unique<BlockHeatEvaluator>(cache_->num_blocks_);
 
     // 缓存路由表指针，避免虚函数调用开销
     // 通过 BfsLayoutProvider 的 getRouteTable() 获取

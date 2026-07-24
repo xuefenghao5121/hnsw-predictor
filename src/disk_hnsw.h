@@ -13,6 +13,7 @@
 
 #include "common.h"
 #include "block_cache.h"
+#include "block_heat_evaluator.h"
 #include "layout_provider.h"
 #include "replacement_policy.h"
 #include "graph_prefetcher.h"
@@ -190,6 +191,9 @@ private:
 
     // ---- Phase 3 Redesign: 图引导预取器 ----
     std::unique_ptr<GraphPrefetcher> graph_prefetcher_;
+
+    // Block 热度评价器
+    std::unique_ptr<BlockHeatEvaluator> heat_evaluator_;
     bool graph_prefetch_enabled_ = false;
 
     // ---- Phase 3 CPU Opt: 路由表缓存 ----
