@@ -11,6 +11,7 @@
 #include "disk_hnsw.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -218,6 +219,12 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
 
     float lowerBound = entryDist;
 
+    // 时效性实验: lookahead 预取深度 (环境变量 LOOKAHEAD_HOPS, 0=关闭=原 baseline)
+    static const int kLookaheadHops = [](){
+        const char* e = std::getenv("LOOKAHEAD_HOPS");
+        return e ? std::atoi(e) : 0;
+    }();
+
     while (!candidate_set.empty()) {
         auto [candidateDist, candidateId] = candidate_set.top();
 
@@ -225,6 +232,36 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
             break;
         }
         candidate_set.pop();
+
+        // ---- 时效性实验: lookahead 预取 ----
+        // 偏看 candidate_set 里即将展开的后 N 个 candidate,提前预取它们邻居的 block
+        // 不碰遍历顺序/lowerBound/visited/top_candidates -> recall 不受影响
+        if (kLookaheadHops > 0 && graph_prefetch_enabled_ && graph_prefetcher_) {
+            auto cs_copy = candidate_set;  // 拷贝, 不动原队列
+            std::vector<uint32_t> la_blocks;
+            int hops = 0;
+            while (!cs_copy.empty() && hops < kLookaheadHops) {
+                uint32_t la_cand = cs_copy.top().second;
+                cs_copy.pop();
+                hops++;
+                uint32_t la_cand_block = getBlockIdFast(la_cand);
+                // 只能从已缓存的 candidate block 读邻居(能进 candidate_set 说明已加载)
+                CachedBlock* lb = cache_->peekCachedBlockById(la_cand_block);
+                if (!lb) continue;
+                uint32_t nc = 0;
+                const uint32_t* nbrs = lb->getNeighbors(la_cand, nc);
+                if (!nbrs) continue;
+                for (uint32_t k2 = 0; k2 < nc; k2++) {
+                    uint32_t nb = getBlockIdFast(nbrs[k2]);
+                    la_blocks.push_back(nb);
+                }
+            }
+            if (!la_blocks.empty()) {
+                std::sort(la_blocks.begin(), la_blocks.end());
+                la_blocks.erase(std::unique(la_blocks.begin(), la_blocks.end()), la_blocks.end());
+                graph_prefetcher_->submitPrefetch(la_blocks, true);  // 内部自动跳过已缓存/在途
+            }
+        }
 
         // ---- 优化：直接获取 CachedBlock，避免后续多次锁 + 路由查找 ----
         uint32_t curr_block_id = getBlockIdFast(candidateId);

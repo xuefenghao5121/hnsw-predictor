@@ -190,6 +190,14 @@ public:
     // 如果 block 不在缓存，加载到缓存并返回 true，失败返回 false
     bool tryPrefetch(uint32_t block_id);
 
+    // 时效性实验: 只读穚探缓存中的 block, 不改任何统计/LRU (避免污染命中率对比)
+    // 不在缓存返回 nullptr, 不触发磁盘加载
+    CachedBlock* peekCachedBlockById(uint32_t block_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_map_.find(block_id);
+        return it != cache_map_.end() ? &it->second : nullptr;
+    }
+
     // ---- Phase 3 Redesign: io_uring 预取支持 ----
 
     // 从外部预加载的数据插入缓存（io_uring 完成后调用）
