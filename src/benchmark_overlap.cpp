@@ -321,14 +321,15 @@ int main(int argc, char** argv) {
         malloc_trim(0);
     }
 
-    // ---- F2-single-c4096: 同内存 (256MB) 对比 ----
-    std::cout << "\n[F2-single-c4096] c4096+GP, blocking (同内存 256MB)..." << std::endl;
+    // ---- F2-single-256MB: 同内存 (256MB) 对比, slots 按 block_size 自动计算 ----
+    size_t mem256_slots = (size_t)256 * 1024 * 1024 / block_size;  // 64KB->4096, 32KB->8192
+    std::cout << "\n[F2-single-256MB] c" << mem256_slots << "+GP, blocking (同内存 256MB)..." << std::endl;
     {
         auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
         auto policy = std::make_unique<LRUPolicy>();
         auto cache = std::make_unique<BlockCache>(
             blocks_path, std::move(layout), std::move(policy),
-            4096, dim, odirect_config);
+            mem256_slots, dim, odirect_config);
         DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
         hnsw.setEf(ef);
         hnsw.enableGraphPrefetch(true);
@@ -350,7 +351,7 @@ int main(int argc, char** argv) {
         auto t1 = std::chrono::high_resolution_clock::now();
 
         BenchResult r;
-        r.name = "F2-single: c4096+GP (256MB)";
+        r.name = "F2-single: c" + std::to_string(mem256_slots) + "+GP (256MB)";
         r.lat = computeLatency(latencies);
         r.qps = num_query / std::chrono::duration<double>(t1 - t0).count();
         r.rss_mb = getRSS_MB();
