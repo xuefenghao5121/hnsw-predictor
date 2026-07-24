@@ -317,12 +317,8 @@ bool BlockCache::evictOne() {
     // 热度加权: 如果 victim 是热 block, 尝试找更冷的
     // 通过遍历 LRU 队尾区域 (最多检查5个)
     if (heat_evaluator_ && heat_evaluator_->getQueryCount() > 5) {
-        // 用 LRU 的 onAccess/onRemove 做简单的热度比较
-        // victim 已经是最久未使用的, 如果它恰好是热 block, 
-        // 说明缓存压力大, 仍然淘汰它 (热度是软提示)
-        // 但记录热度淘汰统计
         if (heat_evaluator_->getHeat(victim) > 10.0f) {
-            stats_.hot_evictions++;
+            // 热 block 被淘汰, 记录但不阻止 (缓存压力大)
         }
     }
 

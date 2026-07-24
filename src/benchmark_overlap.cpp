@@ -321,6 +321,58 @@ int main(int argc, char** argv) {
         malloc_trim(0);
     }
 
+    // ---- F2-single-c4096: 同内存 (256MB) 对比 ----
+    std::cout << "\n[F2-single-c4096] c4096+GP, blocking (同内存 256MB)..." << std::endl;
+    {
+        auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
+        auto policy = std::make_unique<LRUPolicy>();
+        auto cache = std::make_unique<BlockCache>(
+            blocks_path, std::move(layout), std::move(policy),
+            4096, dim, odirect_config);
+        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
+        hnsw.setEf(ef);
+        hnsw.enableGraphPrefetch(true);
+        hnsw.resetCacheStats();
+        if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+
+        for (size_t q = 0; q < std::min(10UL, num_query); q++)
+            hnsw.searchKnn(&query_data[q * dim], k);
+
+        std::vector<double> latencies(num_query);
+        std::vector<std::vector<SearchResult>> results(num_query);
+        auto t0 = std::chrono::high_resolution_clock::now();
+        for (size_t q = 0; q < num_query; q++) {
+            auto q0 = std::chrono::high_resolution_clock::now();
+            results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+            auto q1 = std::chrono::high_resolution_clock::now();
+            latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
+        }
+        auto t1 = std::chrono::high_resolution_clock::now();
+
+        BenchResult r;
+        r.name = "F2-single: c4096+GP (256MB)";
+        r.lat = computeLatency(latencies);
+        r.qps = num_query / std::chrono::duration<double>(t1 - t0).count();
+        r.rss_mb = getRSS_MB();
+        size_t correct = 0;
+        for (size_t q = 0; q < num_query; q++) {
+            std::set<uint64_t> hset;
+            for (const auto& [d, id] : hnsw_baseline[q]) hset.insert(id);
+            for (const auto& [d, id] : results[q]) if (hset.count(id)) correct++;
+        }
+        r.recall_hnsw = (double)correct / (num_query * k) * 100;
+        auto& stats = hnsw.getCacheStats();
+        r.hit_rate = stats.total_accesses > 0 ?
+            (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
+        auto& pf = hnsw.getGraphPrefetchStats();
+        r.pf_submitted = pf.prefetch_submitted;
+        r.pf_skipped = pf.prefetch_skipped;
+        r.pf_failed = pf.prefetch_failed;
+        printResult(r);
+        all_results.push_back(r);
+    }
+    malloc_trim(0);
+
     // Summary
     std::cout << "\n\n=== SUMMARY ===" << std::endl;
     std::cout << "| Config | Mean(ms) | P99(ms) | QPS | Hit% | R@HNSW | PF_sub | PF_skip | PF_fail |" << std::endl;
