@@ -25,6 +25,7 @@
 #include "common.h"
 #include "layout_provider.h"
 #include "replacement_policy.h"
+#include "block_heat_evaluator.h"
 
 // ============================================================
 // IOConfig: I/O 模式配置
@@ -270,6 +271,9 @@ public:
     // 获取布局和策略信息
     const std::string& getLayoutName() const { return layout_name_; }
     const std::string& getPolicyName() const { return policy_name_; }
+
+    // 设置热度评价器 (用于热度加权淘汰)
+    void setHeatEvaluator(BlockHeatEvaluator* eval) { heat_evaluator_ = eval; }
     const IOConfig& getIOConfig() const { return io_config_; }
 
 private:
@@ -284,6 +288,9 @@ private:
 
     // ---- 可插拔替换策略 ----
     std::unique_ptr<ReplacementPolicy> policy_;
+
+    // 热度评价器 (可选, 由 DiskHNSW 设置)
+    BlockHeatEvaluator* heat_evaluator_ = nullptr;
     std::string policy_name_;
 
     // ---- I/O 配置 ----

@@ -767,6 +767,7 @@ void DiskHNSW::enableGraphPrefetch(bool use_odirect) {
 
     // 初始化热度评价器
     heat_evaluator_ = std::make_unique<BlockHeatEvaluator>(cache_->num_blocks_);
+    cache_->setHeatEvaluator(heat_evaluator_.get());
 
     // 缓存路由表指针，避免虚函数调用开销
     // 通过 BfsLayoutProvider 的 getRouteTable() 获取
