@@ -65,6 +65,10 @@ struct CachedBlock {
     uint32_t dim = 0;              // 向量维度
     uint32_t first_node_id = 0;    // Block 内第一个 node_id（BFS 重排保证连续）
 
+    // ---- 预取准确率度量（纯观测，不影响搜索/recall）----
+    bool was_prefetched = false;   // 是否经预取路径插入（vs 按需 miss 加载）
+    bool was_accessed = false;     // 在缓存期间是否被搜索真正访问过
+
     // 原始磁盘数据（保持不释放，vectors 和 neighbors 指针指向这里）
     std::vector<uint8_t> raw_data;
 
@@ -110,6 +114,9 @@ public:
         std::atomic<size_t> cache_misses{0};     // 缓存未命中次数
         std::atomic<size_t> evictions{0};        // 淘汰次数
         std::atomic<size_t> disk_reads{0};       // 磁盘读取次数
+        // ---- 预取准确率度量 ----
+        std::atomic<size_t> prefetch_useful{0};  // 预取块淘汰/结束时已被访问
+        std::atomic<size_t> prefetch_wasted{0};  // 预取块淘汰/结束时从未被访问
     };
 
     // ---- 新构造函数（可插拔接口）----

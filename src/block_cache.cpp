@@ -154,6 +154,25 @@ BlockCache::BlockCache(const std::string& blocks_path,
 }
 
 BlockCache::~BlockCache() {
+    // 预取准确率结算: 结束时仍驻留缓存的预取块
+    for (const auto& [bid, blk] : cache_map_) {
+        if (blk.was_prefetched) {
+            if (blk.was_accessed) stats_.prefetch_useful++;
+            else                  stats_.prefetch_wasted++;
+        }
+    }
+    // 打印预取准确率报告
+    {
+        size_t pu = stats_.prefetch_useful.load();
+        size_t pw = stats_.prefetch_wasted.load();
+        size_t tot = pu + pw;
+        double acc = tot > 0 ? (100.0 * pu / tot) : 0.0;
+        std::cerr << "[Prefetch Accuracy] useful=" << pu
+                  << " wasted=" << pw
+                  << " total_prefetched_settled=" << tot
+                  << " accuracy=" << acc << "%" << std::endl;
+    }
+
     if (mmap_ptr_ && mmap_ptr_ != MAP_FAILED) {
         munmap(mmap_ptr_, mmap_size_);
     }
@@ -322,6 +341,15 @@ bool BlockCache::evictOne() {
         }
     }
 
+    // 预取准确率结算: victim 若是预取块, 按是否被访问计入 useful/wasted
+    {
+        auto vit = cache_map_.find(victim);
+        if (vit != cache_map_.end() && vit->second.was_prefetched) {
+            if (vit->second.was_accessed) stats_.prefetch_useful++;
+            else                          stats_.prefetch_wasted++;
+        }
+    }
+
     cache_map_.erase(victim);
     policy_->onRemove(victim);
     stats_.evictions++;
@@ -366,6 +394,7 @@ CachedBlock* BlockCache::getBlockByNodeId(uint32_t node_id) {
     if (it != cache_map_.end()) {
         // 缓存命中
         stats_.cache_hits++;
+        it->second.was_accessed = true;  // 预取准确率: 标记被访问
         policy_->onAccess(block_id);
         if (trace_cb_) trace_cb_(block_id, true);
         return &it->second;
@@ -405,6 +434,7 @@ CachedBlock* BlockCache::getBlockById(uint32_t block_id) {
     auto it = cache_map_.find(block_id);
     if (it != cache_map_.end()) {
         stats_.cache_hits++;
+        it->second.was_accessed = true;  // 预取准确率: 标记被访问
         policy_->onAccess(block_id);
         if (trace_cb_) trace_cb_(block_id, true);
         return &it->second;
@@ -570,6 +600,7 @@ bool BlockCache::insertBlock(uint32_t block_id, std::vector<uint8_t>&& raw_data,
     CachedBlock block;
     block.block_id = block_id;
     block.dim = dim_;
+    block.was_prefetched = true;  // 预取准确率: 标记预取插入
     block.raw_data = std::move(raw_data);
 
     // 解析 Block 数据
@@ -606,6 +637,7 @@ bool BlockCache::insertBlockFromPtr(uint32_t block_id, const void* data, size_t 
     CachedBlock block;
     block.block_id = block_id;
     block.dim = dim_;
+    block.was_prefetched = true;  // 预取准确率: 标记预取插入
     block.raw_data.resize(block_size_);
     std::memcpy(block.raw_data.data(), data, block_size_);
 
@@ -658,6 +690,7 @@ bool BlockCache::insertBlocksBatch(const std::vector<BatchEntry>& entries) {
         CachedBlock block;
         block.block_id = entry.block_id;
         block.dim = dim_;
+        block.was_prefetched = true;  // 预取准确率: 标记预取插入
         block.raw_data.resize(block_size_);
         std::memcpy(block.raw_data.data(), entry.data, block_size_);
         parseBlock(block);  // CPU work: memcpy + parse, 无锁
@@ -694,6 +727,7 @@ CachedBlock* BlockCache::getCachedBlockById(uint32_t block_id) {
         // 统计命中（miss 不在此计数，由 fallback getNodeVector 计数，避免双重计数）
         stats_.total_accesses++;
         stats_.cache_hits++;
+        it->second.was_accessed = true;  // 预取准确率: 标记被访问
         policy_->onAccess(block_id);  // 更新 LRU 策略
         return &it->second;
     }
