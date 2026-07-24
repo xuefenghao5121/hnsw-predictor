@@ -8,7 +8,7 @@ BUILD_DIR = build
 SRC_DIR = src
 
 # 默认目标: 编译所有工具
-all: $(BUILD_DIR)/build_index $(BUILD_DIR)/extract_graph $(BUILD_DIR)/bfs_reorder $(BUILD_DIR)/write_blocks $(BUILD_DIR)/gen_route $(BUILD_DIR)/verify $(BUILD_DIR)/test_block_cache $(BUILD_DIR)/test_disk_hnsw
+all: $(BUILD_DIR)/build_index $(BUILD_DIR)/extract_graph $(BUILD_DIR)/bfs_reorder $(BUILD_DIR)/kmeans_reorder $(BUILD_DIR)/write_blocks $(BUILD_DIR)/gen_route $(BUILD_DIR)/verify $(BUILD_DIR)/test_block_cache $(BUILD_DIR)/test_disk_hnsw
 
 # 创建 build 目录
 $(BUILD_DIR):
@@ -25,6 +25,10 @@ $(BUILD_DIR)/extract_graph: $(SRC_DIR)/extract_graph.cpp $(SRC_DIR)/common.h | $
 # Task 1.2: BFS 全局重排
 $(BUILD_DIR)/bfs_reorder: $(SRC_DIR)/bfs_reorder.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/bfs_reorder.cpp $(LDFLAGS)
+
+# Task 1.2b: K-means 分区重排 (d-HNSW 风格)
+$(BUILD_DIR)/kmeans_reorder: $(SRC_DIR)/kmeans_reorder.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/kmeans_reorder.cpp $(LDFLAGS)
 
 # Task 1.3: 切分 Block 并落盘
 $(BUILD_DIR)/write_blocks: $(SRC_DIR)/write_blocks.cpp $(SRC_DIR)/common.h | $(BUILD_DIR)
@@ -92,6 +96,10 @@ $(BUILD_DIR)/benchmark_fadvise: $(SRC_DIR)/benchmark_fadvise.cpp $(SRC_DIR)/disk
 # Full benchmark (multi-config, multi-queryset)
 $(BUILD_DIR)/benchmark_full: $(SRC_DIR)/benchmark_full.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_full.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
+
+# I/O overlap benchmark (F0 vs F2-single vs F2-batch)
+$(BUILD_DIR)/benchmark_overlap: $(SRC_DIR)/benchmark_overlap.cpp $(SRC_DIR)/disk_hnsw.h $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.h $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/layout_provider.h $(SRC_DIR)/replacement_policy.h $(SRC_DIR)/graph_prefetcher.h $(SRC_DIR)/graph_prefetcher.cpp $(SRC_DIR)/io_uring_wrapper.h $(SRC_DIR)/common.h | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ $(SRC_DIR)/benchmark_overlap.cpp $(SRC_DIR)/disk_hnsw.cpp $(SRC_DIR)/block_cache.cpp $(SRC_DIR)/graph_prefetcher.cpp $(LDFLAGS)
 
 clean:
 	rm -f $(BUILD_DIR)/*

@@ -532,8 +532,9 @@ bool BlockCache::tryPrefetch(uint32_t block_id) {
         if (recent_accesses_.size() > MAX_RECENT_ACCESSES) {
             recent_accesses_.erase(recent_accesses_.begin());
         }
-        // 预取的 block 不计入 total_accesses（那是主线程的统计）
-        // 但计入 disk_reads
+        // 预取的 block 不在缓存中，需要 I/O 加载 -> 计为 miss
+        stats_.total_accesses++;
+        stats_.cache_misses++;
         stats_.disk_reads++;
         return true;
     } catch (...) {
@@ -572,6 +573,9 @@ bool BlockCache::insertBlock(uint32_t block_id, std::vector<uint8_t>&& raw_data,
     // 插入缓存
     cache_map_.emplace(block_id, std::move(block));
     policy_->onInsert(block_id);
+    // block 不在缓存，I/O 加载 -> 计为 miss
+    stats_.total_accesses++;
+    stats_.cache_misses++;
     stats_.disk_reads++;  // 计为磁盘读（虽然是 io_uring 完成的）
 
     return true;
@@ -606,6 +610,9 @@ bool BlockCache::insertBlockFromPtr(uint32_t block_id, const void* data, size_t 
     // 插入缓存
     cache_map_.emplace(block_id, std::move(block));
     policy_->onInsert(block_id);
+    // block 不在缓存，I/O 加载 -> 计为 miss
+    stats_.total_accesses++;
+    stats_.cache_misses++;
     stats_.disk_reads++;
 
     return true;
@@ -666,6 +673,9 @@ bool BlockCache::insertBlocksBatch(const std::vector<BatchEntry>& entries) {
 
         cache_map_.emplace(block_id, std::move(block));
         policy_->onInsert(block_id);
+        // block 不在缓存，I/O 加载 -> 计为 miss
+        stats_.total_accesses++;
+        stats_.cache_misses++;
         stats_.disk_reads++;
     }
 
@@ -676,6 +686,9 @@ CachedBlock* BlockCache::getCachedBlockById(uint32_t block_id) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = cache_map_.find(block_id);
     if (it != cache_map_.end()) {
+        // 统计命中（miss 不在此计数，由 fallback getNodeVector 计数，避免双重计数）
+        stats_.total_accesses++;
+        stats_.cache_hits++;
         policy_->onAccess(block_id);  // 更新 LRU 策略
         return &it->second;
     }

@@ -427,6 +427,214 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
 }
 
 // ============================================================
+// 非阻塞 Layer 0 搜索 (I/O overlap 优化)
+// ============================================================
+
+// Deferred item: 邻居或候选节点的 block 不在缓存, 需要等待 I/O
+struct DeferredItem {
+    uint32_t nodeId;
+    uint32_t blockId;
+    float savedLowerBound;  // defer 时的 lowerBound
+};
+
+std::priority_queue<std::pair<float, uint32_t>,
+                    std::vector<std::pair<float, uint32_t>>,
+                    std::greater<std::pair<float, uint32_t>>>
+DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, size_t ef,
+                                  VisitedList& visited) {
+    // 最大堆维护 top candidates (距离大的在堆顶, 方便淘汰)
+    std::priority_queue<std::pair<float, uint32_t>,
+                        std::vector<std::pair<float, uint32_t>>,
+                        std::less<std::pair<float, uint32_t>>> top_candidates;
+    // 最小堆维护 candidate set (距离小的在堆顶, 优先展开)
+    std::priority_queue<std::pair<float, uint32_t>,
+                        std::vector<std::pair<float, uint32_t>>,
+                        std::greater<std::pair<float, uint32_t>>> candidate_set;
+
+    auto getBlockIdFast = [&](uint32_t node_id) -> uint32_t {
+        if (route_table_) return (*route_table_)[node_id];
+        return cache_->getBlockId(node_id);
+    };
+
+    // 初始化: 入口节点
+    const float* entryVec = cache_->getNodeVector(entry_new_id);
+    if (!entryVec) {
+        std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
+        return candidate_set;
+    }
+    float entryDist = l2Distance(query, entryVec);
+    top_candidates.emplace(entryDist, entry_new_id);
+    candidate_set.emplace(entryDist, entry_new_id);
+    visited.markVisited(entry_new_id);
+    float lowerBound = entryDist;
+
+    // deferred 列表: block 不在缓存的邻居
+    std::vector<DeferredItem> deferred;
+
+    while (true) {
+        // ---- Phase 1: 处理所有 in-cache candidates (非阻塞) ----
+        while (!candidate_set.empty()) {
+            auto [candidateDist, candidateId] = candidate_set.top();
+
+            if (candidateDist > lowerBound && top_candidates.size() == ef) {
+                goto check_deferred;
+            }
+            candidate_set.pop();
+
+            uint32_t curr_block_id = getBlockIdFast(candidateId);
+            CachedBlock* candidateBlock = cache_->getCachedBlockById(curr_block_id);
+
+            if (!candidateBlock) {
+                // 候选 block miss: 同步加载 (避免 io_uring 死锁)
+                cache_->getBlockById(curr_block_id);
+                candidateBlock = cache_->getCachedBlockById(curr_block_id);
+                if (!candidateBlock) continue;
+                // 继续处理 (和阻塞版一样)
+            }
+
+            // 快速路径: 从 CachedBlock 获取邻居
+            uint32_t neighborCount = 0;
+            const uint32_t* neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
+            if (!neighbors || neighborCount == 0) continue;
+            std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
+
+            // 提交 1-hop 预取
+            if (graph_prefetch_enabled_ && graph_prefetcher_) {
+                std::vector<uint32_t> prefetch_blocks;
+                for (uint32_t nid : local_neighbors) {
+                    uint32_t neighbor_block = getBlockIdFast(nid);
+                    if (neighbor_block != curr_block_id) {
+                        prefetch_blocks.push_back(neighbor_block);
+                    }
+                }
+                std::sort(prefetch_blocks.begin(), prefetch_blocks.end());
+                prefetch_blocks.erase(
+                    std::unique(prefetch_blocks.begin(), prefetch_blocks.end()),
+                    prefetch_blocks.end());
+                if (!prefetch_blocks.empty()) {
+                    graph_prefetcher_->submitPrefetch(prefetch_blocks, true);
+                }
+            }
+
+            // 处理 in-cache 邻居, defer out-of-cache 邻居
+            for (uint32_t j = 0; j < local_neighbors.size(); j++) {
+                uint32_t neighborId = local_neighbors[j];
+                if (neighborId >= graph_.num_nodes) continue;
+                if (visited.isVisited(neighborId)) continue;
+                visited.markVisited(neighborId);
+
+                uint32_t neighbor_block = getBlockIdFast(neighborId);
+                CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
+                if (nBlock) {
+                    const float* neighborVec = nBlock->getVector(neighborId);
+                    if (!neighborVec) continue;
+                    float dist = l2Distance(query, neighborVec);
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, neighborId);
+                        top_candidates.emplace(dist, neighborId);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                    }
+                } else {
+                    // 非阻塞: defer neighbor, 延迟 visited 标记
+                    deferred.push_back({neighborId, neighbor_block, lowerBound});
+                }
+            }
+            // 不调用 waitForBlocks! 继续处理下一个 candidate
+        }
+
+        check_deferred:
+        // ---- Phase 2: candidate_set 空, 检查 deferred ----
+        if (deferred.empty()) break;  // 真正完成!
+
+        // 非阻塞 reap
+        if (graph_prefetch_enabled_ && graph_prefetcher_) {
+            graph_prefetcher_->reapCompletions();
+        }
+
+        // 检查哪些 deferred 邻居的 block 已就绪
+        std::vector<DeferredItem> still_deferred;
+        bool any_ready = false;
+
+        for (auto& item : deferred) {
+            CachedBlock* block = cache_->getCachedBlockById(item.blockId);
+            if (block) {
+                if (!visited.isVisited(item.nodeId)) {
+                    visited.markVisited(item.nodeId);
+                    const float* vec = block->getVector(item.nodeId);
+                    if (vec) {
+                        float dist = l2Distance(query, vec);
+                        // 用 savedLowerBound (等价于阻塞版: 等待期间 lowerBound 不变)
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, item.nodeId);
+                            top_candidates.emplace(dist, item.nodeId);
+                            if (top_candidates.size() > ef) top_candidates.pop();
+                            if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                        }
+                    }
+                }
+                any_ready = true;
+            } else {
+                still_deferred.push_back(item);
+            }
+        }
+        deferred = std::move(still_deferred);
+
+        if (!candidate_set.empty()) {
+            // 有新的 candidate, 回 Phase 1
+            continue;
+        }
+
+        if (deferred.empty()) break;  // 全部处理完
+
+        // ---- Phase 3: 所有 candidate 处理完, deferred 仍无就绪 -> 等 I/O ----
+        if (graph_prefetch_enabled_ && graph_prefetcher_) {
+            // 提交 deferred block 的预取 (可能尚未提交)
+            std::vector<uint32_t> need_prefetch;
+            for (const auto& item : deferred) {
+                if (!cache_->isInCache(item.blockId)) {
+                    need_prefetch.push_back(item.blockId);
+                }
+            }
+            std::sort(need_prefetch.begin(), need_prefetch.end());
+            need_prefetch.erase(std::unique(need_prefetch.begin(), need_prefetch.end()),
+                                need_prefetch.end());
+            if (!need_prefetch.empty()) {
+                graph_prefetcher_->submitPrefetch(need_prefetch, true);
+            }
+
+            // 同步加载第一个 deferred block (避免 io_uring waitForAnyBlock 死锁)
+            if (!deferred.empty()) {
+                cache_->getBlockById(deferred.front().blockId);
+            }
+        } else {
+            // 无预取器: 同步加载 (回退)
+            for (const auto& item : deferred) {
+                const float* vec = cache_->getNodeVector(item.nodeId);
+                if (!vec) continue;
+                float dist = l2Distance(query, vec);
+                if (top_candidates.size() < ef || lowerBound > dist) {
+                    candidate_set.emplace(dist, item.nodeId);
+                    top_candidates.emplace(dist, item.nodeId);
+                    if (top_candidates.size() > ef) top_candidates.pop();
+                    if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                }
+            }
+            deferred.clear();
+        }
+        // 回 Phase 1 或 Phase 2
+    }
+
+    // 返回 candidate_set (最小堆) 以保持与 searchLayer0 接口一致
+    // 将 top_candidates (最大堆) 中的元素转移到 candidate_set (最小堆)
+    while (!top_candidates.empty()) {
+        candidate_set.emplace(top_candidates.top());
+        top_candidates.pop();
+    }
+    return candidate_set;
+}
+
+// ============================================================
 // KNN搜索
 // ============================================================
 
@@ -465,6 +673,66 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
     }
 
     return result;
+}
+
+// ============================================================
+// 批量 KNN 搜索 (I/O overlap 优化)
+// ============================================================
+
+std::vector<std::vector<DiskHNSW::SearchResult>>
+DiskHNSW::batchSearch(const std::vector<float>& queries, size_t k, size_t batch_size) {
+    std::vector<std::vector<SearchResult>> results;
+    size_t dim = dim_;
+    size_t total = queries.size() / dim;
+    results.reserve(total);
+
+    for (size_t batch_start = 0; batch_start < total; batch_start += batch_size) {
+        size_t batch_end = std::min(batch_start + batch_size, total);
+        size_t n = batch_end - batch_start;
+
+        // Phase 1: 对所有查询做贪心下降, 收集 entry blocks
+        std::vector<uint32_t> entry_new_ids(n);
+        std::vector<uint32_t> entry_blocks;
+        for (size_t i = 0; i < n; i++) {
+            uint32_t entryOldId = greedyDescent(&queries[(batch_start + i) * dim]);
+            entry_new_ids[i] = old_to_new_[entryOldId];
+            uint32_t block = route_table_ ? (*route_table_)[entry_new_ids[i]]
+                                          : cache_->getBlockId(entry_new_ids[i]);
+            entry_blocks.push_back(block);
+        }
+
+        // Phase 2: 批量预取所有 entry blocks - DISABLED (查询间预取更高效)
+        // if (graph_prefetch_enabled_ && graph_prefetcher_) {
+        //     std::sort(entry_blocks.begin(), entry_blocks.end());
+        //     entry_blocks.erase(std::unique(entry_blocks.begin(), entry_blocks.end()),
+        //                        entry_blocks.end());
+        //     graph_prefetcher_->submitPrefetch(entry_blocks, true);
+        // }
+
+        // Phase 3: 顺序搜索 (使用阻塞搜索保证 recall)
+        // 后续查询受益于: (a) entry block 已预取 (b) 前序查询的缓存预热
+        for (size_t i = 0; i < n; i++) {
+            size_t ef = std::max(ef_search_, k);
+            VisitedList visited(graph_.num_nodes);
+            auto top_candidates = searchLayer0NonBlocking(
+                entry_new_ids[i], &queries[(batch_start + i) * dim], ef, visited);
+
+            // 提取 top-k
+            std::vector<SearchResult> result;
+            size_t numResults = std::min(k, top_candidates.size());
+            result.reserve(numResults);
+            for (size_t j = 0; j < numResults && !top_candidates.empty(); j++) {
+                auto [dist, newId] = top_candidates.top();
+                top_candidates.pop();
+                uint32_t oldId = new_to_old_[newId];
+                uint64_t label = graph_.labels[oldId];
+                result.emplace_back(dist, label);
+            }
+            results.push_back(std::move(result));
+        }
+    }
+
+    return results;
 }
 
 // ============================================================

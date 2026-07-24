@@ -214,25 +214,7 @@ std::vector<BenchResult> runAllConfigs(
     }
     trim();
 
-    // ---- F1: OD c1024, no prefetch ----
-    std::cout << "\n  [F1] OD c1024, no prefetch..." << std::endl;
-    {
-        auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
-        auto policy = std::make_unique<LRUPolicy>();
-        auto cache = std::make_unique<BlockCache>(
-            blocks_path, std::move(layout), std::move(policy),
-            1024, dim, odirect_config);
-        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-        hnsw.setEf(ef);
-        auto r = runBenchmark(hnsw, query_data, gt_data, hnsw_baseline,
-                              dim, k, "F1: c1024", "F1", "none");
-        r.cache_slots = 1024;
-        r.cache_mb = cache_mb(1024);
-        printResult(r);
-        results.push_back(r);
-    }
-    trim();
-
+    // ---- F1: OD c1024, no prefetch (SKIP - user requested F0 vs F2 only) ----
     // ---- F2: OD c1024 + graph prefetch ----
     std::cout << "\n  [F2] OD c1024 + graph prefetch..." << std::endl;
     {
@@ -253,83 +235,7 @@ std::vector<BenchResult> runAllConfigs(
     }
     trim();
 
-    // ---- F3: OD c512, no prefetch ----
-    std::cout << "\n  [F3] OD c512, no prefetch..." << std::endl;
-    {
-        auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
-        auto policy = std::make_unique<LRUPolicy>();
-        auto cache = std::make_unique<BlockCache>(
-            blocks_path, std::move(layout), std::move(policy),
-            512, dim, odirect_config);
-        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-        hnsw.setEf(ef);
-        auto r = runBenchmark(hnsw, query_data, gt_data, hnsw_baseline,
-                              dim, k, "F3: c512", "F3", "none");
-        r.cache_slots = 512;
-        r.cache_mb = cache_mb(512);
-        printResult(r);
-        results.push_back(r);
-    }
-    trim();
-
-    // ---- F4: OD c512 + graph prefetch ----
-    std::cout << "\n  [F4] OD c512 + graph prefetch..." << std::endl;
-    {
-        auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
-        auto policy = std::make_unique<LRUPolicy>();
-        auto cache = std::make_unique<BlockCache>(
-            blocks_path, std::move(layout), std::move(policy),
-            512, dim, odirect_config);
-        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-        hnsw.setEf(ef);
-        hnsw.enableGraphPrefetch(true);
-        auto r = runBenchmark(hnsw, query_data, gt_data, hnsw_baseline,
-                              dim, k, "F4: c512+gp", "F4", "graph");
-        r.cache_slots = 512;
-        r.cache_mb = cache_mb(512);
-        printResult(r);
-        results.push_back(r);
-    }
-    trim();
-
-    // ---- F5: OD c256, no prefetch ----
-    std::cout << "\n  [F5] OD c256, no prefetch..." << std::endl;
-    {
-        auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
-        auto policy = std::make_unique<LRUPolicy>();
-        auto cache = std::make_unique<BlockCache>(
-            blocks_path, std::move(layout), std::move(policy),
-            256, dim, odirect_config);
-        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-        hnsw.setEf(ef);
-        auto r = runBenchmark(hnsw, query_data, gt_data, hnsw_baseline,
-                              dim, k, "F5: c256", "F5", "none");
-        r.cache_slots = 256;
-        r.cache_mb = cache_mb(256);
-        printResult(r);
-        results.push_back(r);
-    }
-    trim();
-
-    // ---- F6: OD c256 + graph prefetch ----
-    std::cout << "\n  [F6] OD c256 + graph prefetch..." << std::endl;
-    {
-        auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
-        auto policy = std::make_unique<LRUPolicy>();
-        auto cache = std::make_unique<BlockCache>(
-            blocks_path, std::move(layout), std::move(policy),
-            256, dim, odirect_config);
-        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-        hnsw.setEf(ef);
-        hnsw.enableGraphPrefetch(true);
-        auto r = runBenchmark(hnsw, query_data, gt_data, hnsw_baseline,
-                              dim, k, "F6: c256+gp", "F6", "graph");
-        r.cache_slots = 256;
-        r.cache_mb = cache_mb(256);
-        printResult(r);
-        results.push_back(r);
-    }
-    trim();
+    // ---- F3-F6: SKIPPED (user requested F0 vs F2 only) ----
 
     return results;
 }

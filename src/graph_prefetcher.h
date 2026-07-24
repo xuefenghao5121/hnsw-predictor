@@ -81,6 +81,11 @@ public:
     // 比逐个 waitForBlock 更高效: 一次 wait+reap 可能完成多个 block
     void waitForBlocks(const std::set<uint32_t>& needed_blocks);
 
+    // 等待任意一个 needed_blocks 中的 block 完成 (非阻塞搜索用)
+    // 一次 wait+reap, 返回后可能有 0~N 个 block 就绪
+    // 不保证所有 needed_blocks 都完成, 只保证至少完成一个
+    void waitForAnyBlock(const std::set<uint32_t>& needed_blocks);
+
     // 获取当前未完成的请求数
     unsigned inflight() const { return ring_.inflight(); }
 

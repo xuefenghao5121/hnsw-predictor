@@ -93,6 +93,7 @@ public:
     // KNN搜索
     // 返回按距离排序的 top-k 结果 (距离从小到大)
     std::vector<SearchResult> searchKnn(const float* query, size_t k);
+    std::vector<std::vector<SearchResult>> batchSearch(const std::vector<float>& queries, size_t k, size_t batch_size = 8);
 
     // 获取缓存统计信息
     const BlockCache::Stats& getCacheStats() const { return cache_->getStats(); }
@@ -223,4 +224,11 @@ private:
                         std::greater<std::pair<float, uint32_t>>>
     searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
                  VisitedList& visited);
+
+    // 非阻塞 Layer 0 搜索 (I/O overlap 优化)
+    std::priority_queue<std::pair<float, uint32_t>,
+                        std::vector<std::pair<float, uint32_t>>,
+                        std::greater<std::pair<float, uint32_t>>>
+    searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, size_t ef,
+                            VisitedList& visited);
 };
