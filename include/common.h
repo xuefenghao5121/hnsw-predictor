@@ -21,6 +21,7 @@ static constexpr uint32_t MAGIC_ROUTE   = 0x524F5554; // "ROUT"
 static constexpr uint32_t MAGIC_BFS     = 0x42465300; // "BFS\0"
 
 static constexpr uint32_t FORMAT_VERSION = 1;
+static constexpr uint32_t FORMAT_VERSION_COMPRESSED = 2;  // delta+varint neighbor encoding
 
 // 默认 Block 大小: 256KB
 static constexpr uint32_t DEFAULT_BLOCK_SIZE = 256 * 1024;
@@ -67,10 +68,14 @@ struct BlockHeader {
     uint32_t node_count;     // Block 内节点数
     uint32_t data_offset;    // 向量数据起始偏移（相对 Block 起始）
     uint32_t adj_offset;     // 邻接表起始偏移（相对 Block 起始）
-    uint64_t reserved;       // 保留
+    uint8_t  flags;          // bit0: neighbor delta+varint compression
+    uint8_t  reserved_pad[7];// 填充对齐
 };
 static_assert(sizeof(BlockHeader) == 24, "BlockHeader size mismatch");
 #pragma pack(pop)
+
+// BlockHeader flags
+static constexpr uint8_t FLAG_NEIGHBOR_DELTA_VARINT = 0x01;
 
 // ============================================================
 // route_table.bin 格式
@@ -128,6 +133,69 @@ struct GraphStructure {
     bool slim = false;
     std::unordered_map<uint32_t, std::vector<float>> upper_vectors;  // old_id -> vector
 };
+
+// ============================================================
+// Varint encoding/decoding (LEB128 unsigned)
+// ============================================================
+
+// Encode a uint32 value as varint into buffer, returns bytes written
+inline size_t varint_encode(uint32_t value, uint8_t* buf) {
+    size_t n = 0;
+    while (value >= 0x80) {
+        buf[n++] = (value & 0x7F) | 0x80;
+        value >>= 7;
+    }
+    buf[n++] = value;
+    return n;
+}
+
+// Decode a varint from buffer, returns bytes consumed; out gets decoded value
+inline size_t varint_decode(const uint8_t* buf, size_t available, uint32_t& out) {
+    out = 0;
+    size_t n = 0;
+    int shift = 0;
+    while (n < available && n < 5) {
+        uint8_t b = buf[n++];
+        out |= (uint32_t)(b & 0x7F) << shift;
+        if ((b & 0x80) == 0) return n;
+        shift += 7;
+    }
+    // malformed varint
+    out = 0;
+    return 0;
+}
+
+// Encode a sorted vector of uint32 IDs as delta+varint into buffer
+// Returns total bytes written
+inline size_t delta_varint_encode(const uint32_t* ids, size_t count, uint8_t* buf) {
+    if (count == 0) return 0;
+    size_t pos = 0;
+    uint32_t prev = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t delta = ids[i] - prev;
+        pos += varint_encode(delta, buf + pos);
+        prev = ids[i];
+    }
+    return pos;
+}
+
+// Decode delta+varint encoded neighbor list into output vector
+// Returns bytes consumed, or 0 on error
+inline size_t delta_varint_decode(const uint8_t* buf, size_t available, size_t count,
+                                   std::vector<uint32_t>& out) {
+    out.resize(count);
+    size_t pos = 0;
+    uint32_t prev = 0;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t delta;
+        size_t n = varint_decode(buf + pos, available - pos, delta);
+        if (n == 0) return 0;
+        pos += n;
+        prev += delta;
+        out[i] = prev;
+    }
+    return pos;
+}
 
 // ============================================================
 // 工具函数

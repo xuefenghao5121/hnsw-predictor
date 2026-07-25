@@ -1,18 +1,14 @@
 // write_blocks.cpp - Task 1.3: 切分 Block 并落盘
 // 按 BFS 顺序将节点切分为固定大小的 Block，写入磁盘文件
 // 邻居 ID 映射为 BFS 重排后的新 ID
+// 邻居列表使用 delta + varint 压缩编码
 //
 // 用法: ./write_blocks <graph_structure.bin> <bfs_order.bin> <blocks.bin> [block_size]
 // 默认 block_size = 262144 (256KB)
 
 #include "common.h"
 #include <cstring>
-
-// 计算 Block 中单个节点占用的空间（字节）
-size_t node_size_in_block(uint32_t dim, uint16_t neighbor_count) {
-    // node_id (4B) + vector (dim*4B) + neighbor_count (2B) + neighbors (neighbor_count * 4B)
-    return sizeof(uint32_t) + dim * sizeof(float) + sizeof(uint16_t) + neighbor_count * sizeof(uint32_t);
-}
+#include <algorithm>
 
 int main(int argc, char** argv) {
     if (argc < 4) {
@@ -25,7 +21,7 @@ int main(int argc, char** argv) {
     std::string output_path = argv[3];
     uint32_t block_size = (argc > 4) ? std::stoul(argv[4]) : DEFAULT_BLOCK_SIZE;
     
-    std::cout << "=== Task 1.3: Write Blocks ===" << std::endl;
+    std::cout << "=== Task 1.3: Write Blocks (delta+varint compressed) ===" << std::endl;
     
     // 加载图结构
     GraphStructure g = load_graph_structure(graph_path);
@@ -61,9 +57,35 @@ int main(int argc, char** argv) {
         }
     }
     
+    // ---- 预计算每个节点的压缩邻接表大小 ----
+    // 压缩格式: 排序 -> delta -> varint
+    std::vector<size_t> compressed_adj_sizes(N);
+    std::vector<uint8_t> tmp_buf(N * 32 + 4096);  // 临时缓冲区
+    for (uint32_t new_id = 0; new_id < N; new_id++) {
+        auto& adj = new_adjacency0[new_id];
+        if (adj.empty()) {
+            compressed_adj_sizes[new_id] = 0;
+        } else {
+            std::vector<uint32_t> sorted_adj = adj;
+            std::sort(sorted_adj.begin(), sorted_adj.end());
+            compressed_adj_sizes[new_id] = delta_varint_encode(
+                sorted_adj.data(), sorted_adj.size(), tmp_buf.data());
+        }
+    }
+    
+    // 统计压缩率
+    size_t total_uncompressed_adj = 0;
+    size_t total_compressed_adj = 0;
+    for (uint32_t i = 0; i < N; i++) {
+        total_uncompressed_adj += new_adjacency0[i].size() * sizeof(uint32_t);
+        total_compressed_adj += compressed_adj_sizes[i];
+    }
+    std::cout << "  Neighbor data: " << total_uncompressed_adj << " -> " << total_compressed_adj
+              << " bytes (" << (100.0 * total_compressed_adj / (total_uncompressed_adj + 1))
+              << "% of original)" << std::endl;
+    
     // 计算每个节点在 Block 中占用的空间，进行 Block 切分
-    // Block 布局: [BlockHeader(24B)] [node_ids(4*cnt)] [vectors(dim*4*cnt)] [adj_lists(变长)]
-    // 先计算每个节点的"开销": node_id(4B) + vector(dim*4B) + adj(2B + neighbors*4B)
+    // 压缩格式 Block 布局: [BlockHeader(24B)] [node_ids(4*cnt)] [vectors(dim*4*cnt)] [adj_lists(变长, delta+varint)]
     
     struct BlockPlan {
         uint32_t start_node;  // new_id 范围 [start, end)
@@ -85,13 +107,10 @@ int main(int argc, char** argv) {
         
         while (node_idx + count < N) {
             uint32_t nid = node_idx + count;
-            uint16_t ncnt = static_cast<uint16_t>(new_adjacency0[nid].size());
-            size_t node_bytes = sizeof(uint32_t) + dim * sizeof(float) + sizeof(uint16_t) + ncnt * sizeof(uint32_t);
-            
-            // 检查加入这个节点后是否超限
-            // 需要预留 node_ids 区域、vector 区域、adj 区域
-            // 当前 used = header + 已有 node_ids + 已有 vectors + 已有 adj
-            // 加入后: used += 4 (node_id) + dim*4 (vector) + 2 + ncnt*4 (adj)
+            uint16_t ncnt_unused = static_cast<uint16_t>(new_adjacency0[nid].size());
+            (void)ncnt_unused;  // 压缩格式用 compressed_adj_sizes[nid] 代替
+            // node_id(4B) + vector(dim*4B) + neighbor_count(2B) + compressed_adj
+            size_t node_bytes = sizeof(uint32_t) + dim * sizeof(float) + sizeof(uint16_t) + compressed_adj_sizes[nid];
             
             if (used + node_bytes > block_size && count > 0) {
                 break;  // 当前 Block 已满
@@ -130,7 +149,7 @@ int main(int argc, char** argv) {
     // File Header
     BlocksFileHeader fhdr;
     fhdr.magic = MAGIC_BLOCKS;
-    fhdr.version = FORMAT_VERSION;
+    fhdr.version = FORMAT_VERSION_COMPRESSED;  // 压缩格式版本
     fhdr.block_size = block_size;
     fhdr.num_blocks = num_blocks;
     out.write(reinterpret_cast<const char*>(&fhdr), sizeof(BlocksFileHeader));
@@ -142,6 +161,7 @@ int main(int argc, char** argv) {
     
     // 为每个 Block 分配固定大小的 buffer
     std::vector<char> block_buf(block_size, 0);
+    std::vector<uint8_t> encode_buf(4096);  // 临时编码缓冲区
     
     for (uint32_t b = 0; b < num_blocks; b++) {
         const auto& plan = block_plans[b];
@@ -160,7 +180,8 @@ int main(int argc, char** argv) {
         bh.node_count = cnt;
         bh.data_offset = vectors_offset;
         bh.adj_offset = adj_offset;
-        bh.reserved = 0;
+        bh.flags = FLAG_NEIGHBOR_DELTA_VARINT;  // 标记压缩格式
+        memset(bh.reserved_pad, 0, sizeof(bh.reserved_pad));
         memcpy(block_buf.data(), &bh, sizeof(BlockHeader));
         
         // 写 Node IDs (new_id)
@@ -177,7 +198,7 @@ int main(int argc, char** argv) {
                    &g.vectors[old_id * dim], dim * sizeof(float));
         }
         
-        // 写 Adjacency Lists (新 ID)
+        // 写 Adjacency Lists (压缩格式: 排序 + delta + varint)
         size_t adj_pos = adj_offset;
         for (uint32_t i = 0; i < cnt; i++) {
             uint32_t new_id = plan.start_node + i;
@@ -185,8 +206,14 @@ int main(int argc, char** argv) {
             memcpy(block_buf.data() + adj_pos, &ncnt, sizeof(uint16_t));
             adj_pos += sizeof(uint16_t);
             if (ncnt > 0) {
-                memcpy(block_buf.data() + adj_pos, new_adjacency0[new_id].data(), ncnt * sizeof(uint32_t));
-                adj_pos += ncnt * sizeof(uint32_t);
+                // 排序邻居列表
+                std::vector<uint32_t> sorted_adj = new_adjacency0[new_id];
+                std::sort(sorted_adj.begin(), sorted_adj.end());
+                // Delta + varint 编码
+                size_t encoded = delta_varint_encode(sorted_adj.data(), sorted_adj.size(),
+                                                     encode_buf.data());
+                memcpy(block_buf.data() + adj_pos, encode_buf.data(), encoded);
+                adj_pos += encoded;
             }
         }
         
@@ -207,6 +234,7 @@ int main(int argc, char** argv) {
     meta_out << "block_size=" << block_size << "\n";
     meta_out << "num_nodes=" << N << "\n";
     meta_out << "dim=" << dim << "\n";
+    meta_out << "format=delta_varint_compressed\n";
     for (uint32_t b = 0; b < num_blocks; b++) {
         const auto& plan = block_plans[b];
         meta_out << "block " << b << " "
@@ -218,6 +246,10 @@ int main(int argc, char** argv) {
     // 统计
     std::cout << "\n=== Block Writing Statistics ===" << std::endl;
     std::cout << "  Total blocks: " << num_blocks << std::endl;
+    std::cout << "  Neighbor data: " << total_uncompressed_adj << " -> " << total_compressed_adj
+              << " bytes (" << (100.0 * total_compressed_adj / (total_uncompressed_adj + 1))
+              << "% of original, " << (100.0 - 100.0 * total_compressed_adj / (total_uncompressed_adj + 1))
+              << "% savings)" << std::endl;
     std::cout << "  Total file size: " << (BLOCKS_FILE_HEADER_SIZE + (size_t)num_blocks * block_size) << " bytes" 
               << " (" << (BLOCKS_FILE_HEADER_SIZE + (size_t)num_blocks * block_size) / (1024*1024) << " MB)" << std::endl;
     std::cout << "  Metadata saved to " << meta_path << std::endl;

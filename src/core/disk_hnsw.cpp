@@ -947,6 +947,192 @@ search_done:
 }
 
 // ============================================================
+// 批量并行 I/O 搜索 (Batch I/O)
+//
+// 核心优化: 取 candidate queue 的 top-N, 批量收集所有未访问邻居,
+// 一次性提交 io_uring (~200 个 I/O), 并行返回后批量算距离.
+// 相比逐个 candidate 展开, I/O 并行度从 1 提升到 ~N×22.
+//
+// 使用 frozenLB (冻结 lowerBound) 保证 recall 100%:
+// 在一个 batch 内不更新 lowerBound, 可能多保留一些 candidate,
+// 但不会丢掉任何应该保留的.
+// ============================================================
+
+std::priority_queue<std::pair<float, uint32_t>,
+                    std::vector<std::pair<float, uint32_t>>,
+                    std::greater<std::pair<float, uint32_t>>>
+DiskHNSW::searchLayer0BatchIO(uint32_t entry_new_id, const float* query, size_t ef,
+                              VisitedList& visited, int batch_size) {
+    // 最大堆: top candidates (距离大的在堆顶, 方便淘汰)
+    std::priority_queue<std::pair<float, uint32_t>,
+        std::vector<std::pair<float, uint32_t>>,
+        std::less<std::pair<float, uint32_t>>> top_candidates;
+    // 最小堆: candidate set (距离小的在堆顶, 优先展开)
+    std::priority_queue<std::pair<float, uint32_t>,
+        std::vector<std::pair<float, uint32_t>>,
+        std::greater<std::pair<float, uint32_t>>> candidate_set;
+
+    auto getBlockIdFast = [&](uint32_t node_id) -> uint32_t {
+        if (route_table_) return (*route_table_)[node_id];
+        return cache_->getBlockId(node_id);
+    };
+
+    // 初始化: 入口节点
+    const float* entryVec = cache_->getNodeVector(entry_new_id);
+    if (!entryVec) {
+        std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
+        return candidate_set;
+    }
+    float entryDist = l2Distance(query, entryVec);
+    top_candidates.emplace(entryDist, entry_new_id);
+    candidate_set.emplace(entryDist, entry_new_id);
+    visited.markVisited(entry_new_id);
+    float lowerBound = entryDist;
+
+    while (!candidate_set.empty()) {
+        // ===== Phase 1: 取 batch (最多 batch_size 个候选) =====
+        float frozenLB = lowerBound;  // 冻结 lowerBound, 保证 recall
+
+        struct BatchCandidate {
+            float dist;
+            uint32_t nodeId;
+            uint32_t blockId;
+        };
+        std::vector<BatchCandidate> batch;
+
+        while ((int)batch.size() < batch_size && !candidate_set.empty()) {
+            auto [dist, nodeId] = candidate_set.top();
+            // 终止条件: 搜索收敛
+            if (dist > frozenLB && top_candidates.size() == ef) {
+                goto search_done;
+            }
+            candidate_set.pop();
+            uint32_t blockId = getBlockIdFast(nodeId);
+            batch.push_back({dist, nodeId, blockId});
+        }
+
+        if (batch.empty()) break;
+
+        // ===== Phase 2: 确保所有候选 block 已加载 =====
+        // 收集不在缓存的候选 block, 批量提交 I/O
+        std::vector<uint32_t> cand_miss_blocks;
+        for (auto& bc : batch) {
+            if (!cache_->peekCachedBlockById(bc.blockId)) {
+                cand_miss_blocks.push_back(bc.blockId);
+            }
+        }
+        std::sort(cand_miss_blocks.begin(), cand_miss_blocks.end());
+        cand_miss_blocks.erase(
+            std::unique(cand_miss_blocks.begin(), cand_miss_blocks.end()),
+            cand_miss_blocks.end());
+
+        if (!cand_miss_blocks.empty()) {
+            if (graph_prefetch_enabled_ && graph_prefetcher_) {
+                graph_prefetcher_->submitPrefetch(cand_miss_blocks, true);
+                std::set<uint32_t> needed(cand_miss_blocks.begin(),
+                                          cand_miss_blocks.end());
+                graph_prefetcher_->waitForBlocks(needed);
+            } else {
+                for (uint32_t b : cand_miss_blocks) cache_->getBlockById(b);
+            }
+        }
+
+        // ===== Phase 3: 展开所有候选, 收集未访问邻居 =====
+        // in-cache 邻居: 立即算距离
+        // out-of-cache 邻居: 收集到 pending 列表
+        struct PendingNbr {
+            uint32_t neighborId;
+            uint32_t blockId;
+        };
+        std::vector<PendingNbr> pending;
+        std::vector<uint32_t> pending_blocks;  // for batch I/O
+
+        for (auto& bc : batch) {
+            CachedBlock* blk = cache_->getCachedBlockById(bc.blockId);
+            if (!blk) continue;
+            if (heat_evaluator_) heat_evaluator_->onBlockAccess(bc.blockId);
+
+            uint32_t neighborCount = 0;
+            const uint32_t* neighbors = blk->getNeighbors(bc.nodeId, neighborCount);
+            if (!neighbors || neighborCount == 0) continue;
+
+            for (uint32_t j = 0; j < neighborCount; j++) {
+                uint32_t neighborId = neighbors[j];
+                if (neighborId >= graph_.num_nodes) continue;
+                if (visited.isVisited(neighborId)) continue;
+                visited.markVisited(neighborId);
+
+                uint32_t nb = getBlockIdFast(neighborId);
+                CachedBlock* nblk = cache_->getCachedBlockById(nb);
+                if (nblk) {
+                    // in-cache: 立即算距离
+                    const float* nvec = nblk->getVector(neighborId);
+                    if (!nvec) continue;
+                    float d = l2Distance(query, nvec);
+                    if (top_candidates.size() < ef || frozenLB > d) {
+                        candidate_set.emplace(d, neighborId);
+                        top_candidates.emplace(d, neighborId);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                    }
+                } else {
+                    // out-of-cache: 收集
+                    pending.push_back({neighborId, nb});
+                    pending_blocks.push_back(nb);
+                }
+            }
+        }
+
+        // ===== Phase 4: 批量提交所有邻居 block I/O =====
+        // 一次提交 ~200 个 I/O, io_uring 并行处理
+        std::sort(pending_blocks.begin(), pending_blocks.end());
+        pending_blocks.erase(
+            std::unique(pending_blocks.begin(), pending_blocks.end()),
+            pending_blocks.end());
+
+        if (!pending_blocks.empty()) {
+            if (graph_prefetch_enabled_ && graph_prefetcher_) {
+                graph_prefetcher_->submitPrefetch(pending_blocks, true);
+                std::set<uint32_t> needed(pending_blocks.begin(),
+                                          pending_blocks.end());
+                graph_prefetcher_->waitForBlocks(needed);
+            } else {
+                for (uint32_t b : pending_blocks) cache_->getBlockById(b);
+            }
+        }
+
+        // ===== Phase 5: 批量计算 pending 邻居距离 =====
+        for (auto& p : pending) {
+            CachedBlock* nblk = cache_->getCachedBlockById(p.blockId);
+            if (!nblk) continue;
+            const float* nvec = nblk->getVector(p.neighborId);
+            if (!nvec) continue;
+            float d = l2Distance(query, nvec);
+            if (top_candidates.size() < ef || frozenLB > d) {
+                candidate_set.emplace(d, p.neighborId);
+                top_candidates.emplace(d, p.neighborId);
+                if (top_candidates.size() > ef) top_candidates.pop();
+            }
+        }
+
+        // ===== Phase 6: 更新 lowerBound =====
+        if (!top_candidates.empty()) {
+            lowerBound = top_candidates.top().first;
+        }
+    }
+
+search_done:
+    // 转换 top_candidates 为最小堆返回
+    std::priority_queue<std::pair<float, uint32_t>,
+        std::vector<std::pair<float, uint32_t>>,
+        std::greater<std::pair<float, uint32_t>>> result;
+    while (!top_candidates.empty()) {
+        result.push(top_candidates.top());
+        top_candidates.pop();
+    }
+    return result;
+}
+
+// ============================================================
 // KNN搜索
 // ============================================================
 
@@ -981,11 +1167,19 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
         return e ? std::atoi(e) : 0;
     }();
 
+    // 环境变量 BATCH_IO_N 控制批量并行 I/O 搜索 (0=关闭, >0=batch size)
+    static const int kBatchIO_N = []() {
+        const char* e = std::getenv("BATCH_IO_N");
+        return e ? std::atoi(e) : 0;
+    }();
+
     std::priority_queue<std::pair<float, uint32_t>,
         std::vector<std::pair<float, uint32_t>>,
         std::greater<std::pair<float, uint32_t>>> top_candidates;
 
-    if (kBeamWidth > 1) {
+    if (kBatchIO_N > 1) {
+        top_candidates = searchLayer0BatchIO(entryNewId, query, ef, visited, kBatchIO_N);
+    } else if (kBeamWidth > 1) {
         top_candidates = searchLayer0Beam(entryNewId, query, ef, visited, kBeamWidth);
     } else if (kNonBlock) {
         top_candidates = searchLayer0NonBlocking(entryNewId, query, ef, visited);

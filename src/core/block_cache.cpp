@@ -18,6 +18,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
+#include <algorithm>
 #include <thread>
 #include <chrono>
 
@@ -130,6 +131,11 @@ BlockCache::BlockCache(const std::string& blocks_path,
         std::cerr << "[BlockCache] Warning: Layout blocks (" << layout_->getNumBlocks()
                   << ") != file blocks (" << num_blocks_ << ")" << std::endl;
     }
+
+    // ---- 3. 初始化 Flat Cache ----
+    // 使用与 block cache 相同的内存预算 (cache_slots_ * block_size_)
+    size_t flat_cache_budget = cache_slots_ * block_size_;
+    initFlatCache(flat_cache_budget);
 }
 
 // 向后兼容构造函数
@@ -182,6 +188,23 @@ BlockCache::~BlockCache() {
     if (aligned_buffer_) {
         free(aligned_buffer_);
     }
+    // Free flat cache
+    if (flat_vec_data_) {
+        free(flat_vec_data_);
+        flat_vec_data_ = nullptr;
+    }
+    if (flat_vec_owners_) {
+        free(flat_vec_owners_);
+        flat_vec_owners_ = nullptr;
+    }
+    if (flat_block_ptrs_) {
+        free(flat_block_ptrs_);
+        flat_block_ptrs_ = nullptr;
+    }
+    if (flat_block_owners_) {
+        free(flat_block_owners_);
+        flat_block_owners_ = nullptr;
+    }
 }
 
 // ============================================================
@@ -205,6 +228,110 @@ void BlockCache::simulateLatency() {
         auto us = std::chrono::microseconds(
             static_cast<int64_t>(io_config_.simulated_latency_us));
         std::this_thread::sleep_for(us);
+    }
+}
+
+// ============================================================
+// Flat Cache 初始化与管理
+// ============================================================
+
+void BlockCache::initFlatCache(size_t cache_bytes) {
+    if (cache_bytes == 0 || dim_ == 0) return;
+
+    // ---- Flat Vector Cache ----
+    // 关键：保持小到能装入 L3 cache (通常 8-32MB)
+    // 大数组会导致随机访问时 L3 miss，反而变慢
+    // 限制最大 4MB (约 10K slots for dim=96)
+    size_t vec_max_bytes = 4 * 1024 * 1024;  // 4MB
+    size_t vec_budget = std::min(cache_bytes, vec_max_bytes);
+    size_t vec_entry_size = dim_ * sizeof(float);
+    size_t vec_owner_size = sizeof(uint32_t);
+    size_t vec_total_per_slot = vec_entry_size + vec_owner_size;
+    flat_vec_num_slots_ = vec_budget / vec_total_per_slot;
+
+    if (flat_vec_num_slots_ > 0) {
+        // 分配对齐的向量数据数组
+        int ret = posix_memalign((void**)&flat_vec_data_, 64,
+                                 flat_vec_num_slots_ * vec_entry_size);
+        if (ret != 0) {
+            flat_vec_data_ = nullptr;
+            std::cerr << "[BlockCache] Warning: flat_vec_data_ alloc failed" << std::endl;
+        }
+        // 分配 owner 数组
+        ret = posix_memalign((void**)&flat_vec_owners_, 64,
+                             flat_vec_num_slots_ * sizeof(uint32_t));
+        if (ret != 0) {
+            flat_vec_owners_ = nullptr;
+            std::cerr << "[BlockCache] Warning: flat_vec_owners_ alloc failed" << std::endl;
+        }
+        if (flat_vec_data_ && flat_vec_owners_) {
+            // 初始化所有 owner 为 UINT32_MAX (空)
+            std::fill(flat_vec_owners_, flat_vec_owners_ + flat_vec_num_slots_, UINT32_MAX);
+            std::cout << "[BlockCache] Flat vec cache: " << flat_vec_num_slots_
+                      << " slots, " << (flat_vec_num_slots_ * vec_entry_size / 1024)
+                      << " KB, entry_size=" << vec_entry_size << std::endl;
+        } else {
+            flat_vec_num_slots_ = 0;
+        }
+    }
+
+    // ---- Flat Block Pointer Cache ----
+    // 使用 cache_slots_ 作为 slot 数量 (与 block cache 大小相同)
+    // 这样 flat block cache 最多 ~384KB (32K * 12B)
+    flat_block_num_slots_ = std::min((size_t)num_blocks_, (size_t)cache_slots_ * 4);
+    if (flat_block_num_slots_ > 0) {
+        int ret = posix_memalign((void**)&flat_block_ptrs_, 64,
+                                 flat_block_num_slots_ * sizeof(CachedBlock*));
+        if (ret != 0) {
+            flat_block_ptrs_ = nullptr;
+        }
+        ret = posix_memalign((void**)&flat_block_owners_, 64,
+                             flat_block_num_slots_ * sizeof(uint32_t));
+        if (ret != 0) {
+            flat_block_owners_ = nullptr;
+        }
+        if (flat_block_ptrs_ && flat_block_owners_) {
+            std::fill(flat_block_ptrs_, flat_block_ptrs_ + flat_block_num_slots_, nullptr);
+            std::fill(flat_block_owners_, flat_block_owners_ + flat_block_num_slots_, UINT32_MAX);
+            std::cout << "[BlockCache] Flat block cache: " << flat_block_num_slots_
+                      << " slots, " << (flat_block_num_slots_ * sizeof(CachedBlock*) / 1024)
+                      << " KB" << std::endl;
+        } else {
+            flat_block_num_slots_ = 0;
+        }
+    }
+}
+
+void BlockCache::populateFlatCache(const CachedBlock& block) {
+    // 只更新 block 指针缓存 (轻量级, 不拷贝向量数据)
+    // 向量数据通过 getNodeVector 懒加载到 flat vec cache
+    if (flat_block_num_slots_ > 0 && flat_block_ptrs_ && flat_block_owners_) {
+        size_t slot = (size_t)block.block_id % flat_block_num_slots_;
+        flat_block_owners_[slot] = block.block_id;
+        flat_block_ptrs_[slot] = const_cast<CachedBlock*>(&block);
+    }
+}
+
+void BlockCache::invalidateFlatBlockCache(uint32_t block_id) {
+    if (flat_block_num_slots_ > 0 && flat_block_ptrs_ && flat_block_owners_) {
+        size_t slot = (size_t)block_id % flat_block_num_slots_;
+        // 只有当 owner 匹配时才清除 (避免清除新插入的 block)
+        if (flat_block_owners_[slot] == block_id) {
+            flat_block_owners_[slot] = UINT32_MAX;
+            flat_block_ptrs_[slot] = nullptr;
+        }
+    }
+    // 注意: 不清除向量缓存，因为向量数据是不可变的
+    // (node_id 的向量永远不会变，stale 条目仍然正确)
+}
+
+void BlockCache::clearFlatCache() {
+    if (flat_vec_owners_ && flat_vec_num_slots_ > 0) {
+        std::fill(flat_vec_owners_, flat_vec_owners_ + flat_vec_num_slots_, UINT32_MAX);
+    }
+    if (flat_block_owners_ && flat_block_num_slots_ > 0) {
+        std::fill(flat_block_owners_, flat_block_owners_ + flat_block_num_slots_, UINT32_MAX);
+        std::fill(flat_block_ptrs_, flat_block_ptrs_ + flat_block_num_slots_, nullptr);
     }
 }
 
@@ -283,7 +410,6 @@ void BlockCache::parseBlock(CachedBlock& block) {
         base + sizeof(BlockHeader));
 
     // BFS 重排保证 block 内 node_id 连续，记录 first_node_id
-    // 后续用 node_id - first_node_id 直接索引，无需 hash map
     if (block.node_count > 0) {
         block.first_node_id = node_ids[0];
     }
@@ -296,29 +422,92 @@ void BlockCache::parseBlock(CachedBlock& block) {
     const uint8_t* adj_ptr = base + bh.adj_offset;
     const uint8_t* adj_end = base + block_size_;
 
+    // 检测压缩格式
+    bool compressed = (bh.flags & FLAG_NEIGHBOR_DELTA_VARINT) != 0;
+
     // ---- 构建展开后的节点索引 ----
     block.nodes.resize(block.node_count);
-    // 不再需要 node_id_to_local reserve 和构建
 
-    for (uint32_t i = 0; i < block.node_count; i++) {
-        CachedNode& node = block.nodes[i];
-
-        node.node_id = node_ids[i];
-        node.vector = vectors + (size_t)i * dim_;
-
-        if (adj_ptr + sizeof(uint16_t) > adj_end) {
-            node.neighbor_count = 0;
-            node.neighbors = nullptr;
-        } else {
+    if (compressed) {
+        // 压缩格式: 需要解码 delta+varint 邻居列表
+        // 先计算所有邻居的总数，一次性分配 neighbor_pool
+        size_t total_neighbors = 0;
+        const uint8_t* scan_ptr = adj_ptr;
+        for (uint32_t i = 0; i < block.node_count; i++) {
+            if (scan_ptr + sizeof(uint16_t) > adj_end) break;
             uint16_t cnt;
-            std::memcpy(&cnt, adj_ptr, sizeof(uint16_t));
-            adj_ptr += sizeof(uint16_t);
+            std::memcpy(&cnt, scan_ptr, sizeof(uint16_t));
+            scan_ptr += sizeof(uint16_t);
+            total_neighbors += cnt;
+            if (cnt > 0) {
+                // 跳过 varint 编码的数据
+                for (uint16_t j = 0; j < cnt; j++) {
+                    while (scan_ptr < adj_end && (*scan_ptr & 0x80)) scan_ptr++;
+                    if (scan_ptr < adj_end) scan_ptr++;
+                }
+            }
+        }
+        // 预分配 neighbor_pool，所有解码后的邻居存在这里
+        block.neighbor_pool.resize(total_neighbors);
+        uint32_t* pool_ptr = block.neighbor_pool.data();
+
+        // 重新解析，这次解码并填充
+        const uint8_t* decode_ptr = adj_ptr;
+        for (uint32_t i = 0; i < block.node_count; i++) {
+            CachedNode& node = block.nodes[i];
+            node.node_id = node_ids[i];
+            node.vector = vectors + (size_t)i * dim_;
+
+            if (decode_ptr + sizeof(uint16_t) > adj_end) {
+                node.neighbor_count = 0;
+                node.neighbors = nullptr;
+                continue;
+            }
+
+            uint16_t cnt;
+            std::memcpy(&cnt, decode_ptr, sizeof(uint16_t));
+            decode_ptr += sizeof(uint16_t);
 
             node.neighbor_count = cnt;
-            node.neighbors = reinterpret_cast<const uint32_t*>(adj_ptr);
-            adj_ptr += cnt * sizeof(uint32_t);
+            node.neighbors = pool_ptr;  // 指向 neighbor_pool 中的数据
+
+            if (cnt > 0) {
+                // 解码 delta+varint
+                size_t available = adj_end - decode_ptr;
+                std::vector<uint32_t> decoded;
+                size_t consumed = delta_varint_decode(decode_ptr, available, cnt, decoded);
+                if (consumed > 0) {
+                    std::memcpy(pool_ptr, decoded.data(), cnt * sizeof(uint32_t));
+                    pool_ptr += cnt;
+                    decode_ptr += consumed;
+                } else {
+                    // 解码失败
+                    node.neighbor_count = 0;
+                    node.neighbors = nullptr;
+                }
+            }
         }
-        // 不再构建 node_id_to_local hash map
+    } else {
+        // 原始格式 (向后兼容): 邻居存为 uint32_t 数组
+        for (uint32_t i = 0; i < block.node_count; i++) {
+            CachedNode& node = block.nodes[i];
+
+            node.node_id = node_ids[i];
+            node.vector = vectors + (size_t)i * dim_;
+
+            if (adj_ptr + sizeof(uint16_t) > adj_end) {
+                node.neighbor_count = 0;
+                node.neighbors = nullptr;
+            } else {
+                uint16_t cnt;
+                std::memcpy(&cnt, adj_ptr, sizeof(uint16_t));
+                adj_ptr += sizeof(uint16_t);
+
+                node.neighbor_count = cnt;
+                node.neighbors = reinterpret_cast<const uint32_t*>(adj_ptr);
+                adj_ptr += cnt * sizeof(uint32_t);
+            }
+        }
     }
 }
 
@@ -353,6 +542,10 @@ bool BlockCache::evictOne() {
     cache_map_.erase(victim);
     policy_->onRemove(victim);
     stats_.evictions++;
+
+    // 清除 flat block cache 中的指针 (避免悬挂指针)
+    invalidateFlatBlockCache(victim);
+
     return true;
 }
 
@@ -361,10 +554,34 @@ bool BlockCache::evictOne() {
 // ============================================================
 
 const float* BlockCache::getNodeVector(uint32_t node_id) {
+    // ---- Fast path: Flat vector cache (lock-free, no mutex, no hash_map) ----
+    if (flat_vec_num_slots_ > 0 && flat_vec_data_ && flat_vec_owners_) {
+        size_t slot = (size_t)node_id % flat_vec_num_slots_;
+        if (flat_vec_owners_[slot] == node_id) {
+            // Cache hit: 直接返回向量指针
+            flat_stats_.vec_hits++;
+            stats_.total_accesses++;
+            stats_.cache_hits++;
+            return &flat_vec_data_[slot * dim_];
+        }
+        flat_stats_.vec_misses++;
+    }
+
+    // ---- Slow path: existing implementation ----
     CachedBlock* block = getBlockByNodeId(node_id);
     if (!block) return nullptr;
 
-    return block->getVector(node_id);
+    const float* vec = block->getVector(node_id);
+
+    // 如果从 block cache 获取了向量，同时插入 flat cache
+    // (向量数据不可变，可以安全缓存)
+    if (vec && flat_vec_num_slots_ > 0 && flat_vec_data_ && flat_vec_owners_) {
+        size_t slot = (size_t)node_id % flat_vec_num_slots_;
+        flat_vec_owners_[slot] = node_id;
+        std::memcpy(&flat_vec_data_[slot * dim_], vec, dim_ * sizeof(float));
+    }
+
+    return vec;
 }
 
 const uint32_t* BlockCache::getNodeNeighbors(uint32_t node_id, uint32_t& out_count) {
@@ -416,6 +633,10 @@ CachedBlock* BlockCache::getBlockByNodeId(uint32_t node_id) {
         auto result = cache_map_.emplace(block_id, std::move(block));
         policy_->onInsert(block_id);
         if (trace_cb_) trace_cb_(block_id, false);
+
+        // 插入 flat cache
+        populateFlatCache(result.first->second);
+
         return &result.first->second;
     } catch (const std::exception& e) {
         std::cerr << "[BlockCache] ERROR: " << e.what() << std::endl;
@@ -451,6 +672,10 @@ CachedBlock* BlockCache::getBlockById(uint32_t block_id) {
         auto result = cache_map_.emplace(block_id, std::move(block));
         policy_->onInsert(block_id);
         if (trace_cb_) trace_cb_(block_id, false);
+
+        // 插入 flat cache
+        populateFlatCache(result.first->second);
+
         return &result.first->second;
     } catch (const std::exception& e) {
         std::cerr << "[BlockCache] ERROR: " << e.what() << std::endl;
@@ -477,6 +702,11 @@ bool BlockCache::prefetchBlock(uint32_t block_id) {
         CachedBlock block = loadBlockFromDisk(block_id);
         cache_map_.emplace(block_id, std::move(block));
         policy_->onInsert(block_id);
+
+        // 插入 flat cache
+        auto it = cache_map_.find(block_id);
+        if (it != cache_map_.end()) populateFlatCache(it->second);
+
         return true;
     } catch (const std::exception& e) {
         std::cerr << "[BlockCache] prefetch ERROR: " << e.what() << std::endl;
@@ -614,6 +844,10 @@ bool BlockCache::insertBlock(uint32_t block_id, std::vector<uint8_t>&& raw_data,
     stats_.cache_misses++;
     stats_.disk_reads++;  // 计为磁盘读（虽然是 io_uring 完成的）
 
+    // 插入 flat cache
+    auto it = cache_map_.find(block_id);
+    if (it != cache_map_.end()) populateFlatCache(it->second);
+
     return true;
 }
 
@@ -651,6 +885,10 @@ bool BlockCache::insertBlockFromPtr(uint32_t block_id, const void* data, size_t 
     stats_.total_accesses++;
     stats_.cache_misses++;
     stats_.disk_reads++;
+
+    // 插入 flat cache
+    auto it = cache_map_.find(block_id);
+    if (it != cache_map_.end()) populateFlatCache(it->second);
 
     return true;
 }
@@ -715,12 +953,32 @@ bool BlockCache::insertBlocksBatch(const std::vector<BatchEntry>& entries) {
         stats_.total_accesses++;
         stats_.cache_misses++;
         stats_.disk_reads++;
+
+        // 插入 flat cache
+        auto it = cache_map_.find(block_id);
+        if (it != cache_map_.end()) populateFlatCache(it->second);
     }
 
     return true;
 }
 
 CachedBlock* BlockCache::getCachedBlockById(uint32_t block_id) {
+    // ---- Fast path: Flat block pointer cache (lock-free) ----
+    if (flat_block_num_slots_ > 0 && flat_block_ptrs_ && flat_block_owners_) {
+        size_t slot = (size_t)block_id % flat_block_num_slots_;
+        if (flat_block_owners_[slot] == block_id && flat_block_ptrs_[slot] != nullptr) {
+            // Cache hit: 直接返回 block 指针
+            flat_stats_.block_hits++;
+            stats_.total_accesses++;
+            stats_.cache_hits++;
+            flat_block_ptrs_[slot]->was_accessed = true;
+            // 不更新 LRU (批量淘汰策略)
+            return flat_block_ptrs_[slot];
+        }
+        flat_stats_.block_misses++;
+    }
+
+    // ---- Slow path: mutex + hash_map ----
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = cache_map_.find(block_id);
     if (it != cache_map_.end()) {
@@ -729,6 +987,14 @@ CachedBlock* BlockCache::getCachedBlockById(uint32_t block_id) {
         stats_.cache_hits++;
         it->second.was_accessed = true;  // 预取准确率: 标记被访问
         policy_->onAccess(block_id);  // 更新 LRU 策略
+
+        // 插入 flat block cache
+        if (flat_block_num_slots_ > 0 && flat_block_ptrs_ && flat_block_owners_) {
+            size_t slot = (size_t)block_id % flat_block_num_slots_;
+            flat_block_owners_[slot] = block_id;
+            flat_block_ptrs_[slot] = &it->second;
+        }
+
         return &it->second;
     }
     return nullptr;

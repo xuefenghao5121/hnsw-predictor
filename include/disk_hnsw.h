@@ -249,6 +249,15 @@ private:
                              VisitedList& visited,
                              const std::function<uint32_t(uint32_t)>& getBlockIdFast);
 
+    // ---- 批量并行 I/O 搜索 ----
+    // 取 candidate queue 的 top-N, 批量收集所有未访问邻居,
+    // 一次性提交 io_uring, 并行返回后批量算距离
+    std::priority_queue<std::pair<float, uint32_t>,
+                        std::vector<std::pair<float, uint32_t>>,
+                        std::greater<std::pair<float, uint32_t>>>
+    searchLayer0BatchIO(uint32_t entry_new_id, const float* query, size_t ef,
+                        VisitedList& visited, int batch_size);
+
     // ---- 事件驱动批量搜索内部方法 ----
     void initQueryState(QueryState& qs, const float* query, size_t k, size_t ef);
     void stepQueryState(QueryState& qs);

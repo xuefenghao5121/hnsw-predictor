@@ -69,8 +69,12 @@ struct CachedBlock {
     bool was_prefetched = false;   // 是否经预取路径插入（vs 按需 miss 加载）
     bool was_accessed = false;     // 在缓存期间是否被搜索真正访问过
 
-    // 原始磁盘数据（保持不释放，vectors 和 neighbors 指针指向这里）
+    // 原始磁盘数据（保持不释放，vectors 指针指向这里）
     std::vector<uint8_t> raw_data;
+
+    // 解码后的邻居列表存储（delta+varint 解码后存这里）
+    // CachedNode.neighbors 指向此 buffer
+    std::vector<uint32_t> neighbor_pool;
 
     // 展开后的节点索引
     std::vector<CachedNode> nodes;
@@ -291,6 +295,15 @@ public:
     void setHeatEvaluator(BlockHeatEvaluator* eval) { heat_evaluator_ = eval; }
     const IOConfig& getIOConfig() const { return io_config_; }
 
+    // ---- Flat Cache: 快速路径统计 ----
+    struct FlatStats {
+        std::atomic<size_t> vec_hits{0};       // 向量快速路径命中
+        std::atomic<size_t> vec_misses{0};     // 向量快速路径未命中
+        std::atomic<size_t> block_hits{0};     // block指针快速路径命中
+        std::atomic<size_t> block_misses{0};   // block指针快速路径未命中
+    };
+    const FlatStats& getFlatStats() const { return flat_stats_; }
+
 private:
     // ---- 磁盘 I/O ----
     int blocks_fd_;                 // blocks.bin 文件描述符
@@ -331,6 +344,9 @@ private:
     // ---- 统计 ----
     Stats stats_;
 
+    // ---- Flat Cache 统计 ----
+    FlatStats flat_stats_;
+
     // ---- Phase 3: 访问历史记录 ----
     std::vector<uint32_t> recent_accesses_;  // 最近访问的 block_id 序列
     static constexpr size_t MAX_RECENT_ACCESSES = 1024;
@@ -338,6 +354,26 @@ private:
     // ---- Phase 3: 轨迹回调 ----
     TraceCallback trace_cb_;
     friend class DiskHNSW;
+
+    // ---- Flat Vector Cache (lock-free fast path) ----
+    // 直接映射缓存，按 node_id % num_slots 散列
+    // 存储向量数据，无需 mutex
+    float* flat_vec_data_ = nullptr;           // num_slots * dim_ floats
+    uint32_t* flat_vec_owners_ = nullptr;       // num_slots uint32_t (UINT32_MAX = empty)
+    size_t flat_vec_num_slots_ = 0;             // slot 数量
+
+    // ---- Flat Block Pointer Cache (lock-free fast path) ----
+    // 直接映射缓存，按 block_id % num_slots 散列
+    // 存储 CachedBlock* 指针，无需 mutex
+    CachedBlock** flat_block_ptrs_ = nullptr;   // num_slots CachedBlock* 指针
+    uint32_t* flat_block_owners_ = nullptr;     // num_slots uint32_t (UINT32_MAX = empty)
+    size_t flat_block_num_slots_ = 0;           // slot 数量
+
+    // ---- Flat Cache 内部方法 ----
+    void initFlatCache(size_t cache_bytes);
+    void populateFlatCache(const CachedBlock& block);
+    void invalidateFlatBlockCache(uint32_t block_id);
+    void clearFlatCache();
 
     // ---- 内部方法 ----
 
