@@ -138,6 +138,113 @@ float DiskHNSW::l2Distance(const float* a, const float* b) const {
 }
 
 // ============================================================
+// PQ 支持: 加载 PQ codes 和 codebook
+// ============================================================
+
+void DiskHNSW::loadPQCodes(const std::string& pq_path) {
+    std::cout << "[DiskHNSW] Loading PQ codes from " << pq_path << "..." << std::endl;
+
+    std::ifstream in(pq_path, std::ios::binary);
+    if (!in.is_open()) {
+        throw std::runtime_error("Cannot open PQ codes file: " + pq_path);
+    }
+
+    // 读取 PQ 文件头
+    // 格式: magic(4B 'PQCO') + n(8B) + M(4B) + nbits(4B) + dim(4B)
+    //        + codebook_M(4B) + codebook_K(4B) + codebook_dsub(4B)
+    //        + codebook_data(M*K*dsub*4B) + pq_codes(n*M bytes)
+    char magic[4];
+    in.read(magic, 4);
+    if (std::memcmp(magic, "PQCO", 4) != 0) {
+        throw std::runtime_error("Invalid PQ codes file magic");
+    }
+
+    uint64_t n;
+    uint32_t M, nbits, dim;
+    in.read(reinterpret_cast<char*>(&n), sizeof(uint64_t));
+    in.read(reinterpret_cast<char*>(&M), sizeof(uint32_t));
+    in.read(reinterpret_cast<char*>(&nbits), sizeof(uint32_t));
+    in.read(reinterpret_cast<char*>(&dim), sizeof(uint32_t));
+
+    uint32_t cb_M, cb_K, cb_dsub;
+    in.read(reinterpret_cast<char*>(&cb_M), sizeof(uint32_t));
+    in.read(reinterpret_cast<char*>(&cb_K), sizeof(uint32_t));
+    in.read(reinterpret_cast<char*>(&cb_dsub), sizeof(uint32_t));
+
+    pq_params_.M = M;
+    pq_params_.nbits = nbits;
+    pq_params_.dim = dim;
+    pq_params_.dsub = cb_dsub;
+    pq_params_.ksub = cb_K;
+
+    std::cout << "  PQ params: N=" << n << ", M=" << M << ", nbits=" << nbits
+              << ", dim=" << dim << ", dsub=" << cb_dsub
+              << ", ksub=" << cb_K << std::endl;
+
+    if (dim != dim_) {
+        throw std::runtime_error("PQ dim mismatch: " + std::to_string(dim) +
+                                 " vs graph dim " + std::to_string(dim_));
+    }
+    if (cb_M != M || cb_dsub * M != dim) {
+        throw std::runtime_error("PQ codebook dimensions mismatch");
+    }
+
+    // 读取 codebook: M * ksub * dsub floats
+    size_t codebook_size = (size_t)M * cb_K * cb_dsub;
+    pq_codebook_.resize(codebook_size);
+    in.read(reinterpret_cast<char*>(pq_codebook_.data()),
+            codebook_size * sizeof(float));
+
+    // 读取 PQ codes: n * M bytes (old_id 顺序)
+    std::vector<uint8_t> pq_codes_old(n * M);
+    in.read(reinterpret_cast<char*>(pq_codes_old.data()), n * M);
+    in.close();
+
+    // 按 BFS-reordered (new_id) 顺序重排 PQ codes
+    // old_to_new_[old_id] = new_id
+    // pq_codes_old[old_id * M .. old_id * M + M] -> pq_codes_[new_id * M .. new_id * M + M]
+    pq_codes_.resize(n * M);
+    for (uint32_t new_id = 0; new_id < n && new_id < graph_.num_nodes; new_id++) {
+        uint32_t old_id = new_to_old_[new_id];
+        std::memcpy(&pq_codes_[new_id * M], &pq_codes_old[old_id * M], M);
+    }
+
+    pq_enabled_ = true;
+
+    size_t codebook_mb = codebook_size * sizeof(float) / (1024 * 1024);
+    size_t codes_mb = n * M / (1024 * 1024);
+    std::cout << "  PQ codebook: " << codebook_mb << " MB" << std::endl;
+    std::cout << "  PQ codes: " << codes_mb << " MB (" << n << " x " << M << " bytes)" << std::endl;
+    std::cout << "  PQ enabled: ADC distance will be used for Layer 0" << std::endl;
+}
+
+// ============================================================
+// PQ ADC (Asymmetric Distance Computation)
+// ============================================================
+
+float DiskHNSW::pqDistance(const float* query, uint32_t node_id_new) const {
+    // ADC: 用 query (原始向量) 和 PQ code (量化向量) 计算近似 L2 距离
+    // 对每个子量化器 m:
+    //   centroid = codebook[m][code[m]]  // dsub floats
+    //   diff = query[m*dsub : (m+1)*dsub] - centroid
+    //   dist += |diff|^2
+    const uint8_t* code = &pq_codes_[(size_t)node_id_new * pq_params_.M];
+    const float* cb = pq_codebook_.data();
+    float dist = 0.0f;
+
+    for (uint32_t m = 0; m < pq_params_.M; m++) {
+        const float* centroid = cb + (size_t)m * pq_params_.ksub * pq_params_.dsub
+                                    + (size_t)code[m] * pq_params_.dsub;
+        const float* q_sub = query + (size_t)m * pq_params_.dsub;
+        for (uint32_t j = 0; j < pq_params_.dsub; j++) {
+            float d = q_sub[j] - centroid[j];
+            dist += d * d;
+        }
+    }
+    return dist;
+}
+
+// ============================================================
 // 贪心下降（内存中的上层图，old_id空间）
 // ============================================================
 
@@ -202,6 +309,14 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
                         std::vector<std::pair<float, uint32_t>>,
                         std::greater<std::pair<float, uint32_t>>> candidate_set;  // 最小堆
 
+    // 距离计算 helper: PQ 模式用 ADC, 否则用精确 L2
+    auto computeNeighborDist = [&](uint32_t neighborId, const float* neighborVec) -> float {
+        if (pq_enabled_) {
+            return pqDistance(query, neighborId);
+        }
+        return l2Distance(query, neighborVec);
+    };
+
     // 路由表快速访问 lambda（避免虚函数调用）
     auto getBlockIdFast = [&](uint32_t node_id) -> uint32_t {
         if (route_table_) return (*route_table_)[node_id];
@@ -209,12 +324,18 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
     };
 
     // 初始化：计算入口节点距离
-    const float* entryVec = cache_->getNodeVector(entry_new_id);
-    if (!entryVec) {
-        std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
-        return candidate_set;  // 返回空
+    // PQ 模式: 用 ADC 距离; 否则: 从 block cache 获取向量算精确距离
+    float entryDist;
+    if (pq_enabled_) {
+        entryDist = pqDistance(query, entry_new_id);
+    } else {
+        const float* entryVec = cache_->getNodeVector(entry_new_id);
+        if (!entryVec) {
+            std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
+            return candidate_set;  // 返回空
+        }
+        entryDist = l2Distance(query, entryVec);
     }
-    float entryDist = l2Distance(query, entryVec);
     top_candidates.emplace(entryDist, entry_new_id);
     candidate_set.emplace(entryDist, entry_new_id);
     visited.markVisited(entry_new_id);
@@ -298,7 +419,16 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
                 if (visited.isVisited(nid)) continue;
                 visited.markVisited(nid);
                 uint32_t nblock = getBlockIdFast(nid);
-                if (cache_->isInCache(nblock)) {
+                if (pq_enabled_) {
+                    // PQ 模式: 不需要向量, 直接算 ADC 距离
+                    float dist = pqDistance(query, nid);
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, nid);
+                        top_candidates.emplace(dist, nid);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                    }
+                } else if (cache_->isInCache(nblock)) {
                     const float* nvec = cache_->getNodeVector(nid);
                     if (!nvec) continue;
                     float dist = l2Distance(query, nvec);
@@ -318,14 +448,24 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
                 for (const auto& pn : pending_neighbors) needed_blocks.insert(pn.blockId);
                 if (graph_prefetch_enabled_ && graph_prefetcher_) graph_prefetcher_->waitForBlocks(needed_blocks);
                 for (const auto& pn : pending_neighbors) {
-                    const float* nvec = cache_->getNodeVector(pn.neighborId);
-                    if (!nvec) continue;
-                    float dist = l2Distance(query, nvec);
-                    if (top_candidates.size() < ef || lowerBound > dist) {
-                        candidate_set.emplace(dist, pn.neighborId);
-                        top_candidates.emplace(dist, pn.neighborId);
-                        if (top_candidates.size() > ef) top_candidates.pop();
-                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                    if (pq_enabled_) {
+                        float dist = pqDistance(query, pn.neighborId);
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, pn.neighborId);
+                            top_candidates.emplace(dist, pn.neighborId);
+                            if (top_candidates.size() > ef) top_candidates.pop();
+                            if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                        }
+                    } else {
+                        const float* nvec = cache_->getNodeVector(pn.neighborId);
+                        if (!nvec) continue;
+                        float dist = l2Distance(query, nvec);
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, pn.neighborId);
+                            top_candidates.emplace(dist, pn.neighborId);
+                            if (top_candidates.size() > ef) top_candidates.pop();
+                            if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                        }
                     }
                 }
             }
@@ -389,7 +529,20 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
             // 优化：用 getCachedBlockById 一次锁获取获取 block + vector
             // 不再需要 isInCache + getNodeVector 两次锁
             CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
-            if (nBlock) {
+            if (pq_enabled_) {
+                // PQ 模式: 不需要向量, 直接算 ADC 距离
+                float dist = pqDistance(query, neighborId);
+                if (top_candidates.size() < ef || lowerBound > dist) {
+                    candidate_set.emplace(dist, neighborId);
+                    top_candidates.emplace(dist, neighborId);
+                    if (top_candidates.size() > ef) {
+                        top_candidates.pop();
+                    }
+                    if (!top_candidates.empty()) {
+                        lowerBound = top_candidates.top().first;
+                    }
+                }
+            } else if (nBlock) {
                 const float* neighborVec = nBlock->getVector(neighborId);
                 if (!neighborVec) continue;
 
@@ -422,40 +575,68 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
 
                 // 预取完成后，用 getCachedBlockById 快速访问
                 for (const auto& pn : pending_neighbors) {
-                    CachedBlock* nBlock = cache_->getCachedBlockById(pn.blockId);
-                    if (!nBlock) continue;
-                    const float* neighborVec = nBlock->getVector(pn.neighborId);
-                    if (!neighborVec) continue;
-
-                    float dist = l2Distance(query, neighborVec);
-
-                    if (top_candidates.size() < ef || lowerBound > dist) {
-                        candidate_set.emplace(dist, pn.neighborId);
-                        top_candidates.emplace(dist, pn.neighborId);
-                        if (top_candidates.size() > ef) {
-                            top_candidates.pop();
+                    if (pq_enabled_) {
+                        float dist = pqDistance(query, pn.neighborId);
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, pn.neighborId);
+                            top_candidates.emplace(dist, pn.neighborId);
+                            if (top_candidates.size() > ef) {
+                                top_candidates.pop();
+                            }
+                            if (!top_candidates.empty()) {
+                                lowerBound = top_candidates.top().first;
+                            }
                         }
-                        if (!top_candidates.empty()) {
-                            lowerBound = top_candidates.top().first;
+                    } else {
+                        CachedBlock* nBlock = cache_->getCachedBlockById(pn.blockId);
+                        if (!nBlock) continue;
+                        const float* neighborVec = nBlock->getVector(pn.neighborId);
+                        if (!neighborVec) continue;
+
+                        float dist = l2Distance(query, neighborVec);
+
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, pn.neighborId);
+                            top_candidates.emplace(dist, pn.neighborId);
+                            if (top_candidates.size() > ef) {
+                                top_candidates.pop();
+                            }
+                            if (!top_candidates.empty()) {
+                                lowerBound = top_candidates.top().first;
+                            }
                         }
                     }
                 }
             } else {
                 // 无预取器：用 getNodeVector 触发磁盘加载
                 for (const auto& pn : pending_neighbors) {
-                    const float* neighborVec = cache_->getNodeVector(pn.neighborId);
-                    if (!neighborVec) continue;
-
-                    float dist = l2Distance(query, neighborVec);
-
-                    if (top_candidates.size() < ef || lowerBound > dist) {
-                        candidate_set.emplace(dist, pn.neighborId);
-                        top_candidates.emplace(dist, pn.neighborId);
-                        if (top_candidates.size() > ef) {
-                            top_candidates.pop();
+                    if (pq_enabled_) {
+                        float dist = pqDistance(query, pn.neighborId);
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, pn.neighborId);
+                            top_candidates.emplace(dist, pn.neighborId);
+                            if (top_candidates.size() > ef) {
+                                top_candidates.pop();
+                            }
+                            if (!top_candidates.empty()) {
+                                lowerBound = top_candidates.top().first;
+                            }
                         }
-                        if (!top_candidates.empty()) {
-                            lowerBound = top_candidates.top().first;
+                    } else {
+                        const float* neighborVec = cache_->getNodeVector(pn.neighborId);
+                        if (!neighborVec) continue;
+
+                        float dist = l2Distance(query, neighborVec);
+
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, pn.neighborId);
+                            top_candidates.emplace(dist, pn.neighborId);
+                            if (top_candidates.size() > ef) {
+                                top_candidates.pop();
+                            }
+                            if (!top_candidates.empty()) {
+                                lowerBound = top_candidates.top().first;
+                            }
                         }
                     }
                 }
@@ -507,12 +688,17 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
     };
 
     // 初始化: 入口节点
-    const float* entryVec = cache_->getNodeVector(entry_new_id);
-    if (!entryVec) {
-        std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
-        return candidate_set;
+    float entryDist;
+    if (pq_enabled_) {
+        entryDist = pqDistance(query, entry_new_id);
+    } else {
+        const float* entryVec = cache_->getNodeVector(entry_new_id);
+        if (!entryVec) {
+            std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
+            return candidate_set;
+        }
+        entryDist = l2Distance(query, entryVec);
     }
-    float entryDist = l2Distance(query, entryVec);
     top_candidates.emplace(entryDist, entry_new_id);
     candidate_set.emplace(entryDist, entry_new_id);
     visited.markVisited(entry_new_id);
@@ -574,11 +760,9 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
                 visited.markVisited(neighborId);
 
                 uint32_t neighbor_block = getBlockIdFast(neighborId);
-                CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
-                if (nBlock) {
-                    const float* neighborVec = nBlock->getVector(neighborId);
-                    if (!neighborVec) continue;
-                    float dist = l2Distance(query, neighborVec);
+                if (pq_enabled_) {
+                    // PQ 模式: 不需要 block 中的向量, 直接算 ADC 距离
+                    float dist = pqDistance(query, neighborId);
                     if (top_candidates.size() < ef || lowerBound > dist) {
                         candidate_set.emplace(dist, neighborId);
                         top_candidates.emplace(dist, neighborId);
@@ -586,8 +770,21 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
                         if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
                     }
                 } else {
-                    // 非阻塞: defer neighbor, 延迟 visited 标记
-                    deferred.push_back({neighborId, neighbor_block, lowerBound});
+                    CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
+                    if (nBlock) {
+                        const float* neighborVec = nBlock->getVector(neighborId);
+                        if (!neighborVec) continue;
+                        float dist = l2Distance(query, neighborVec);
+                        if (top_candidates.size() < ef || lowerBound > dist) {
+                            candidate_set.emplace(dist, neighborId);
+                            top_candidates.emplace(dist, neighborId);
+                            if (top_candidates.size() > ef) top_candidates.pop();
+                            if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                        }
+                    } else {
+                        // 非阻塞: defer neighbor, 延迟 visited 标记
+                        deferred.push_back({neighborId, neighbor_block, lowerBound});
+                    }
                 }
             }
             // 不调用 waitForBlocks! 继续处理下一个 candidate
@@ -607,25 +804,41 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
         bool any_ready = false;
 
         for (auto& item : deferred) {
-            CachedBlock* block = cache_->getCachedBlockById(item.blockId);
-            if (block) {
+            if (pq_enabled_) {
+                // PQ 模式: 不需要 block 中的向量
                 if (!visited.isVisited(item.nodeId)) {
                     visited.markVisited(item.nodeId);
-                    const float* vec = block->getVector(item.nodeId);
-                    if (vec) {
-                        float dist = l2Distance(query, vec);
-                        // 用 savedLowerBound (等价于阻塞版: 等待期间 lowerBound 不变)
-                        if (top_candidates.size() < ef || lowerBound > dist) {
-                            candidate_set.emplace(dist, item.nodeId);
-                            top_candidates.emplace(dist, item.nodeId);
-                            if (top_candidates.size() > ef) top_candidates.pop();
-                            if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
-                        }
+                    float dist = pqDistance(query, item.nodeId);
+                    // 用 savedLowerBound (等价于阻塞版: 等待期间 lowerBound 不变)
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, item.nodeId);
+                        top_candidates.emplace(dist, item.nodeId);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
                     }
                 }
                 any_ready = true;
             } else {
-                still_deferred.push_back(item);
+                CachedBlock* block = cache_->getCachedBlockById(item.blockId);
+                if (block) {
+                    if (!visited.isVisited(item.nodeId)) {
+                        visited.markVisited(item.nodeId);
+                        const float* vec = block->getVector(item.nodeId);
+                        if (vec) {
+                            float dist = l2Distance(query, vec);
+                            // 用 savedLowerBound (等价于阻塞版: 等待期间 lowerBound 不变)
+                            if (top_candidates.size() < ef || lowerBound > dist) {
+                                candidate_set.emplace(dist, item.nodeId);
+                                top_candidates.emplace(dist, item.nodeId);
+                                if (top_candidates.size() > ef) top_candidates.pop();
+                                if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                            }
+                        }
+                    }
+                    any_ready = true;
+                } else {
+                    still_deferred.push_back(item);
+                }
             }
         }
         deferred = std::move(still_deferred);
@@ -660,14 +873,24 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
         } else {
             // 无预取器: 同步加载 (回退)
             for (const auto& item : deferred) {
-                const float* vec = cache_->getNodeVector(item.nodeId);
-                if (!vec) continue;
-                float dist = l2Distance(query, vec);
-                if (top_candidates.size() < ef || lowerBound > dist) {
-                    candidate_set.emplace(dist, item.nodeId);
-                    top_candidates.emplace(dist, item.nodeId);
-                    if (top_candidates.size() > ef) top_candidates.pop();
-                    if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                if (pq_enabled_) {
+                    float dist = pqDistance(query, item.nodeId);
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, item.nodeId);
+                        top_candidates.emplace(dist, item.nodeId);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                    }
+                } else {
+                    const float* vec = cache_->getNodeVector(item.nodeId);
+                    if (!vec) continue;
+                    float dist = l2Distance(query, vec);
+                    if (top_candidates.size() < ef || lowerBound > dist) {
+                        candidate_set.emplace(dist, item.nodeId);
+                        top_candidates.emplace(dist, item.nodeId);
+                        if (top_candidates.size() > ef) top_candidates.pop();
+                        if (!top_candidates.empty()) lowerBound = top_candidates.top().first;
+                    }
                 }
             }
             deferred.clear();
@@ -704,6 +927,25 @@ void DiskHNSW::expandBeamCandidate(
     CachedBlock* block = cache_->getCachedBlockById(blockId);
     if (!block) {
         // 异常: block 被淘汰, 回退到同步加载
+        if (pq_enabled_) {
+            // PQ 模式: 不需要向量, 只需邻居列表
+            uint32_t neighborCount = 0;
+            const uint32_t* neighbors = cache_->getNodeNeighbors(nodeId, neighborCount);
+            if (!neighbors || neighborCount == 0) return;
+            std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
+            for (uint32_t nid : local_neighbors) {
+                if (nid >= graph_.num_nodes) continue;
+                if (visited.isVisited(nid)) continue;
+                visited.markVisited(nid);
+                float dist = pqDistance(query, nid);
+                if (top_candidates.size() < ef || frozenLB > dist) {
+                    candidate_set.emplace(dist, nid);
+                    top_candidates.emplace(dist, nid);
+                    if (top_candidates.size() > ef) top_candidates.pop();
+                }
+            }
+            return;
+        }
         const float* vec = cache_->getNodeVector(nodeId);
         if (!vec) return;
         uint32_t neighborCount = 0;
@@ -782,12 +1024,9 @@ void DiskHNSW::expandBeamCandidate(
         if (nid >= graph_.num_nodes) continue;
         if (visited.isVisited(nid)) continue;
         visited.markVisited(nid);
-        uint32_t nb = getBlockIdFast(nid);
-        CachedBlock* nBlock = cache_->getCachedBlockById(nb);
-        if (nBlock) {
-            const float* nvec = nBlock->getVector(nid);
-            if (!nvec) continue;
-            float dist = l2Distance(query, nvec);
+        if (pq_enabled_) {
+            // PQ 模式: 不需要向量, 直接算 ADC 距离
+            float dist = pqDistance(query, nid);
             // ★ 用 frozenLB 过滤, 不更新 lowerBound
             if (top_candidates.size() < ef || frozenLB > dist) {
                 candidate_set.emplace(dist, nid);
@@ -795,7 +1034,21 @@ void DiskHNSW::expandBeamCandidate(
                 if (top_candidates.size() > ef) top_candidates.pop();
             }
         } else {
-            pending.push_back({nid, nb});
+            uint32_t nb = getBlockIdFast(nid);
+            CachedBlock* nBlock = cache_->getCachedBlockById(nb);
+            if (nBlock) {
+                const float* nvec = nBlock->getVector(nid);
+                if (!nvec) continue;
+                float dist = l2Distance(query, nvec);
+                // ★ 用 frozenLB 过滤, 不更新 lowerBound
+                if (top_candidates.size() < ef || frozenLB > dist) {
+                    candidate_set.emplace(dist, nid);
+                    top_candidates.emplace(dist, nid);
+                    if (top_candidates.size() > ef) top_candidates.pop();
+                }
+            } else {
+                pending.push_back({nid, nb});
+            }
         }
     }
 
@@ -842,12 +1095,17 @@ DiskHNSW::searchLayer0Beam(uint32_t entry_new_id, const float* query, size_t ef,
     };
 
     // 初始化: 入口节点
-    const float* entryVec = cache_->getNodeVector(entry_new_id);
-    if (!entryVec) {
-        std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
-        return candidate_set;
+    float entryDist;
+    if (pq_enabled_) {
+        entryDist = pqDistance(query, entry_new_id);
+    } else {
+        const float* entryVec = cache_->getNodeVector(entry_new_id);
+        if (!entryVec) {
+            std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
+            return candidate_set;
+        }
+        entryDist = l2Distance(query, entryVec);
     }
-    float entryDist = l2Distance(query, entryVec);
     top_candidates.emplace(entryDist, entry_new_id);
     candidate_set.emplace(entryDist, entry_new_id);
     visited.markVisited(entry_new_id);
@@ -978,12 +1236,17 @@ DiskHNSW::searchLayer0BatchIO(uint32_t entry_new_id, const float* query, size_t 
     };
 
     // 初始化: 入口节点
-    const float* entryVec = cache_->getNodeVector(entry_new_id);
-    if (!entryVec) {
-        std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
-        return candidate_set;
+    float entryDist;
+    if (pq_enabled_) {
+        entryDist = pqDistance(query, entry_new_id);
+    } else {
+        const float* entryVec = cache_->getNodeVector(entry_new_id);
+        if (!entryVec) {
+            std::cerr << "[DiskHNSW] ERROR: Failed to get vector for entry node " << entry_new_id << std::endl;
+            return candidate_set;
+        }
+        entryDist = l2Distance(query, entryVec);
     }
-    float entryDist = l2Distance(query, entryVec);
     top_candidates.emplace(entryDist, entry_new_id);
     candidate_set.emplace(entryDist, entry_new_id);
     visited.markVisited(entry_new_id);
@@ -1063,21 +1326,31 @@ DiskHNSW::searchLayer0BatchIO(uint32_t entry_new_id, const float* query, size_t 
                 visited.markVisited(neighborId);
 
                 uint32_t nb = getBlockIdFast(neighborId);
-                CachedBlock* nblk = cache_->getCachedBlockById(nb);
-                if (nblk) {
-                    // in-cache: 立即算距离
-                    const float* nvec = nblk->getVector(neighborId);
-                    if (!nvec) continue;
-                    float d = l2Distance(query, nvec);
+                if (pq_enabled_) {
+                    // PQ 模式: 不需要向量, 直接算 ADC 距离
+                    float d = pqDistance(query, neighborId);
                     if (top_candidates.size() < ef || frozenLB > d) {
                         candidate_set.emplace(d, neighborId);
                         top_candidates.emplace(d, neighborId);
                         if (top_candidates.size() > ef) top_candidates.pop();
                     }
                 } else {
-                    // out-of-cache: 收集
-                    pending.push_back({neighborId, nb});
-                    pending_blocks.push_back(nb);
+                    CachedBlock* nblk = cache_->getCachedBlockById(nb);
+                    if (nblk) {
+                        // in-cache: 立即算距离
+                        const float* nvec = nblk->getVector(neighborId);
+                        if (!nvec) continue;
+                        float d = l2Distance(query, nvec);
+                        if (top_candidates.size() < ef || frozenLB > d) {
+                            candidate_set.emplace(d, neighborId);
+                            top_candidates.emplace(d, neighborId);
+                            if (top_candidates.size() > ef) top_candidates.pop();
+                        }
+                    } else {
+                        // out-of-cache: 收集
+                        pending.push_back({neighborId, nb});
+                        pending_blocks.push_back(nb);
+                    }
                 }
             }
         }
@@ -1102,15 +1375,24 @@ DiskHNSW::searchLayer0BatchIO(uint32_t entry_new_id, const float* query, size_t 
 
         // ===== Phase 5: 批量计算 pending 邻居距离 =====
         for (auto& p : pending) {
-            CachedBlock* nblk = cache_->getCachedBlockById(p.blockId);
-            if (!nblk) continue;
-            const float* nvec = nblk->getVector(p.neighborId);
-            if (!nvec) continue;
-            float d = l2Distance(query, nvec);
-            if (top_candidates.size() < ef || frozenLB > d) {
-                candidate_set.emplace(d, p.neighborId);
-                top_candidates.emplace(d, p.neighborId);
-                if (top_candidates.size() > ef) top_candidates.pop();
+            if (pq_enabled_) {
+                float d = pqDistance(query, p.neighborId);
+                if (top_candidates.size() < ef || frozenLB > d) {
+                    candidate_set.emplace(d, p.neighborId);
+                    top_candidates.emplace(d, p.neighborId);
+                    if (top_candidates.size() > ef) top_candidates.pop();
+                }
+            } else {
+                CachedBlock* nblk = cache_->getCachedBlockById(p.blockId);
+                if (!nblk) continue;
+                const float* nvec = nblk->getVector(p.neighborId);
+                if (!nvec) continue;
+                float d = l2Distance(query, nvec);
+                if (top_candidates.size() < ef || frozenLB > d) {
+                    candidate_set.emplace(d, p.neighborId);
+                    top_candidates.emplace(d, p.neighborId);
+                    if (top_candidates.size() > ef) top_candidates.pop();
+                }
             }
         }
 
@@ -1346,21 +1628,26 @@ void DiskHNSW::stepQueryState(QueryState& qs) {
         }
         // 用 getCachedBlockById 获取 (更新 LRU)
         CachedBlock* blk = cache_->getCachedBlockById(entryBlock);
-        const float* entryVec = nullptr;
-        if (!blk) {
-            entryVec = cache_->getNodeVector(qs.entryNewId);
+        float entryDist;
+        if (pq_enabled_) {
+            entryDist = pqDistance(qs.query, qs.entryNewId);
+        } else {
+            const float* entryVec = nullptr;
+            if (!blk) {
+                entryVec = cache_->getNodeVector(qs.entryNewId);
+                if (!entryVec) {
+                    qs.done = true;
+                    return;
+                }
+            } else {
+                entryVec = blk->getVector(qs.entryNewId);
+            }
             if (!entryVec) {
                 qs.done = true;
                 return;
             }
-        } else {
-            entryVec = blk->getVector(qs.entryNewId);
+            entryDist = l2Distance(qs.query, entryVec);
         }
-        if (!entryVec) {
-            qs.done = true;
-            return;
-        }
-        float entryDist = l2Distance(qs.query, entryVec);
         qs.top_candidates.emplace(entryDist, qs.entryNewId);
         qs.candidate_set.emplace(entryDist, qs.entryNewId);
         qs.visited->markVisited(qs.entryNewId);
@@ -1385,21 +1672,32 @@ void DiskHNSW::stepQueryState(QueryState& qs) {
 
         std::vector<QueryState::DeferredNeighbor> still_deferred;
         for (auto& dn : qs.deferred) {
-            // 用 getCachedBlockById 更新 LRU
-            CachedBlock* nBlock = cache_->getCachedBlockById(dn.blockId);
-            if (nBlock) {
-                const float* neighborVec = nBlock->getVector(dn.neighborId);
-                if (neighborVec) {
-                    float dist = l2Distance(qs.query, neighborVec);
-                    if (qs.top_candidates.size() < qs.ef || qs.lowerBound > dist) {
-                        qs.candidate_set.emplace(dist, dn.neighborId);
-                        qs.top_candidates.emplace(dist, dn.neighborId);
-                        if (qs.top_candidates.size() > qs.ef) qs.top_candidates.pop();
-                        if (!qs.top_candidates.empty()) qs.lowerBound = qs.top_candidates.top().first;
-                    }
+            if (pq_enabled_) {
+                // PQ 模式: 不需要 block 中的向量
+                float dist = pqDistance(qs.query, dn.neighborId);
+                if (qs.top_candidates.size() < qs.ef || qs.lowerBound > dist) {
+                    qs.candidate_set.emplace(dist, dn.neighborId);
+                    qs.top_candidates.emplace(dist, dn.neighborId);
+                    if (qs.top_candidates.size() > qs.ef) qs.top_candidates.pop();
+                    if (!qs.top_candidates.empty()) qs.lowerBound = qs.top_candidates.top().first;
                 }
             } else {
-                still_deferred.push_back(dn);
+                // 用 getCachedBlockById 更新 LRU
+                CachedBlock* nBlock = cache_->getCachedBlockById(dn.blockId);
+                if (nBlock) {
+                    const float* neighborVec = nBlock->getVector(dn.neighborId);
+                    if (neighborVec) {
+                        float dist = l2Distance(qs.query, neighborVec);
+                        if (qs.top_candidates.size() < qs.ef || qs.lowerBound > dist) {
+                            qs.candidate_set.emplace(dist, dn.neighborId);
+                            qs.top_candidates.emplace(dist, dn.neighborId);
+                            if (qs.top_candidates.size() > qs.ef) qs.top_candidates.pop();
+                            if (!qs.top_candidates.empty()) qs.lowerBound = qs.top_candidates.top().first;
+                        }
+                    }
+                } else {
+                    still_deferred.push_back(dn);
+                }
             }
         }
         qs.deferred = std::move(still_deferred);
@@ -1485,14 +1783,9 @@ void DiskHNSW::stepQueryState(QueryState& qs) {
         if (qs.visited->isVisited(neighborId)) continue;
         qs.visited->markVisited(neighborId);
 
-        uint32_t neighbor_block = route_table_ ? (*route_table_)[neighborId]
-                                               : cache_->getBlockId(neighborId);
-        // getCachedBlockById 更新 LRU
-        CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
-        if (nBlock) {
-            const float* neighborVec = nBlock->getVector(neighborId);
-            if (!neighborVec) continue;
-            float dist = l2Distance(qs.query, neighborVec);
+        if (pq_enabled_) {
+            // PQ 模式: 不需要 block 中的向量, 直接算 ADC 距离
+            float dist = pqDistance(qs.query, neighborId);
             if (qs.top_candidates.size() < qs.ef || qs.lowerBound > dist) {
                 qs.candidate_set.emplace(dist, neighborId);
                 qs.top_candidates.emplace(dist, neighborId);
@@ -1500,7 +1793,23 @@ void DiskHNSW::stepQueryState(QueryState& qs) {
                 if (!qs.top_candidates.empty()) qs.lowerBound = qs.top_candidates.top().first;
             }
         } else {
-            qs.deferred.push_back({neighborId, neighbor_block});
+            uint32_t neighbor_block = route_table_ ? (*route_table_)[neighborId]
+                                                   : cache_->getBlockId(neighborId);
+            // getCachedBlockById 更新 LRU
+            CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
+            if (nBlock) {
+                const float* neighborVec = nBlock->getVector(neighborId);
+                if (!neighborVec) continue;
+                float dist = l2Distance(qs.query, neighborVec);
+                if (qs.top_candidates.size() < qs.ef || qs.lowerBound > dist) {
+                    qs.candidate_set.emplace(dist, neighborId);
+                    qs.top_candidates.emplace(dist, neighborId);
+                    if (qs.top_candidates.size() > qs.ef) qs.top_candidates.pop();
+                    if (!qs.top_candidates.empty()) qs.lowerBound = qs.top_candidates.top().first;
+                }
+            } else {
+                qs.deferred.push_back({neighborId, neighbor_block});
+            }
         }
     }
 }

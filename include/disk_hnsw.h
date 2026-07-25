@@ -30,6 +30,18 @@
 #include <fcntl.h>
 
 // ============================================================
+// PQ (Product Quantization) 支持
+// ============================================================
+
+struct PQParams {
+    uint32_t M = 0;        // 子量化器数
+    uint32_t nbits = 0;    // 每个子量化器位数
+    uint32_t dim = 0;      // 原始向量维度
+    uint32_t dsub = 0;     // 子向量维度 = dim / M
+    uint32_t ksub = 0;     // 每个子量化器的中心点数 = 2^nbits
+};
+
+// ============================================================
 // VisitedList: 简单的访问标记数组（不需要池化，每次搜索创建一个）
 // ============================================================
 struct VisitedList {
@@ -187,11 +199,18 @@ public:
     void setTraceCallback(std::function<void(uint32_t, bool)> cb) { cache_->setTraceCallback(std::move(cb)); }
     void clearTraceCallback() { cache_->clearTraceCallback(); }
 
+    // ---- PQ 支持 ----
+    void loadPQCodes(const std::string& pq_path);
+    bool isPQEnabled() const { return pq_enabled_; }
+    const PQParams& getPQParams() const { return pq_params_; }
+    float pqDistance(const float* query, uint32_t node_id_new) const;
+
 private:
     // ---- 图数据（常驻内存，old_id空间）----
     GraphStructure graph_;
     uint32_t dim_;
     size_t ef_search_;
+    size_t dim_param_;  // 向量维度参数 (兼容旧代码)
 
     // ---- BFS映射 ----
     std::vector<uint32_t> old_to_new_;
@@ -213,8 +232,13 @@ private:
     bool recording_ = false;
     std::set<uint32_t> recorded_blocks_;
 
+    // ---- PQ 数据 ----
+    bool pq_enabled_ = false;
+    PQParams pq_params_;
+    std::vector<float> pq_codebook_;    // [M * ksub * dsub] floats
+    std::vector<uint8_t> pq_codes_;    // [N * M] bytes, indexed by new_id
+
     // ---- 距离计算 ----
-    size_t dim_param_;
     float l2Distance(const float* a, const float* b) const;
 
     // ---- 搜索内部方法 ----

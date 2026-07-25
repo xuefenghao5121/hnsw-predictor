@@ -399,7 +399,13 @@ void BlockCache::parseBlock(CachedBlock& block) {
     block.node_count = bh.node_count;
 
     // 验证偏移量合理性
-    if (bh.data_offset == 0 || bh.adj_offset == 0 ||
+    // PQ 模式: data_offset == 0 表示无向量数据
+    if (bh.data_offset == 0) {
+        // PQ 模式: 只有 node_ids + adj_lists, 无向量
+        block.pq_mode = true;
+        bh.data_offset = 0;
+        bh.adj_offset = sizeof(BlockHeader) + bh.node_count * sizeof(uint32_t);
+    } else if (bh.data_offset == 0 || bh.adj_offset == 0 ||
         bh.data_offset > block_size_ || bh.adj_offset > block_size_) {
         bh.data_offset = sizeof(BlockHeader) + bh.node_count * sizeof(uint32_t);
         bh.adj_offset = bh.data_offset + bh.node_count * dim_ * sizeof(float);
@@ -414,9 +420,12 @@ void BlockCache::parseBlock(CachedBlock& block) {
         block.first_node_id = node_ids[0];
     }
 
-    // ---- 解析 Vectors ----
-    const float* vectors = reinterpret_cast<const float*>(
-        base + bh.data_offset);
+    // ---- 解析 Vectors (PQ 模式下跳过) ----
+    const float* vectors = nullptr;
+    if (!block.pq_mode) {
+        vectors = reinterpret_cast<const float*>(
+            base + bh.data_offset);
+    }
 
     // ---- 解析 Adjacency Lists ----
     const uint8_t* adj_ptr = base + bh.adj_offset;
@@ -456,7 +465,7 @@ void BlockCache::parseBlock(CachedBlock& block) {
         for (uint32_t i = 0; i < block.node_count; i++) {
             CachedNode& node = block.nodes[i];
             node.node_id = node_ids[i];
-            node.vector = vectors + (size_t)i * dim_;
+            node.vector = block.pq_mode ? nullptr : (vectors + (size_t)i * dim_);
 
             if (decode_ptr + sizeof(uint16_t) > adj_end) {
                 node.neighbor_count = 0;
@@ -493,7 +502,7 @@ void BlockCache::parseBlock(CachedBlock& block) {
             CachedNode& node = block.nodes[i];
 
             node.node_id = node_ids[i];
-            node.vector = vectors + (size_t)i * dim_;
+            node.vector = block.pq_mode ? nullptr : (vectors + (size_t)i * dim_);
 
             if (adj_ptr + sizeof(uint16_t) > adj_end) {
                 node.neighbor_count = 0;

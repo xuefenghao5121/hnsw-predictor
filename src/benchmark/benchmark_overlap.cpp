@@ -60,7 +60,12 @@ static std::vector<std::vector<uint64_t>> read_gt(const std::string& path, size_
     std::vector<std::vector<uint64_t>> gt(n);
     for (size_t i = 0; i < n; i++) {
         gt[i].resize(k);
+        // Read first k labels
         in.read(reinterpret_cast<char*>(gt[i].data()), k * sizeof(uint64_t));
+        // Skip remaining kk - k labels (file has kk labels per query)
+        if (kk > (uint32_t)k) {
+            in.seekg((size_t)(kk - k) * sizeof(uint64_t), std::ios::cur);
+        }
     }
     return gt;
 }
@@ -199,7 +204,27 @@ int main(int argc, char** argv) {
     odirect_config.use_odirect = true;
     odirect_config.drop_page_cache = true;
 
+    // PQ 模式: 检查 PQ_CODES_PATH 环境变量
+    const char* pq_path_env = std::getenv("PQ_CODES_PATH");
+    bool pq_mode = (pq_path_env != nullptr && pq_path_env[0] != '\0');
+    if (pq_mode) {
+        std::cout << "\n[PQ] PQ codes path: " << pq_path_env << std::endl;
+    }
+
     std::vector<BenchResult> all_results;
+
+    // Helper: 创建 DiskHNSW 并加载 PQ codes (如果 PQ_CODES_PATH 设置)
+    auto setupHnsw = [&](std::unique_ptr<BlockCache> cache) -> std::unique_ptr<DiskHNSW> {
+        auto hnsw = std::make_unique<DiskHNSW>(graph_path, bfs_path, std::move(cache));
+        hnsw->setEf(ef);
+        hnsw->enableGraphPrefetch(true);
+        if (pq_mode) {
+            hnsw->loadPQCodes(pq_path_env);
+        }
+        hnsw->resetCacheStats();
+        if (hnsw->isGraphPrefetchEnabled()) hnsw->resetGraphPrefetchStats();
+        return hnsw;
+    };
 
     // ---- F0: hnswlib native (skip if SKIP_F0) ----
     if (!skip_f0) {
@@ -253,14 +278,10 @@ int main(int argc, char** argv) {
         auto cache = std::make_unique<BlockCache>(
             blocks_path, std::move(layout), std::move(policy),
             1024, dim, odirect_config);
-        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-        hnsw.setEf(ef);
-        hnsw.enableGraphPrefetch(true);
-        hnsw.resetCacheStats();
-        if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+        auto hnsw = setupHnsw(std::move(cache));
 
         for (size_t q = 0; q < std::min(10UL, num_query); q++)
-            hnsw.searchKnn(&query_data[q * dim], k);
+            hnsw->searchKnn(&query_data[q * dim], k);
 
         std::vector<double> latencies(num_query);
         std::vector<std::vector<SearchResult>> results(num_query);
@@ -268,7 +289,7 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::high_resolution_clock::now();
         for (size_t q = 0; q < num_query; q++) {
             auto q0 = std::chrono::high_resolution_clock::now();
-            results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+            results[q] = hnsw->searchKnn(&query_data[q * dim], k);
             auto q1 = std::chrono::high_resolution_clock::now();
             latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
         }
@@ -288,10 +309,10 @@ int main(int argc, char** argv) {
         }
         r.recall_hnsw = (double)correct / (num_query * k) * 100;
 
-        auto& stats = hnsw.getCacheStats();
+        auto& stats = hnsw->getCacheStats();
         r.hit_rate = stats.total_accesses > 0 ?
             (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-        auto pf = hnsw.getGraphPrefetchStats();
+        auto pf = hnsw->getGraphPrefetchStats();
         r.pf_submitted = pf.prefetch_submitted;
         r.pf_skipped = pf.prefetch_skipped;
         r.pf_failed = pf.prefetch_failed;
@@ -320,16 +341,16 @@ int main(int argc, char** argv) {
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
                 1024, dim, odirect_config);
-            DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-            hnsw.setEf(ef);
-            hnsw.enableGraphPrefetch(true);
-            hnsw.resetCacheStats();
-            if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+            auto hnsw = setupHnsw(std::move(cache));
+            
+            
+            
+            
 
             // Warmup
             std::vector<float> warmup_q(std::min(10UL, num_query) * dim);
             std::memcpy(warmup_q.data(), query_data.data(), warmup_q.size() * sizeof(float));
-            hnsw.batchSearch(warmup_q, k, bs);
+            hnsw->batchSearch(warmup_q, k, bs);
 
             // Timed search (逐查询计时, 报告 batch QPS)
             std::vector<double> batch_latencies(num_query);
@@ -337,7 +358,7 @@ int main(int argc, char** argv) {
             auto t0 = std::chrono::high_resolution_clock::now();
             for (size_t q = 0; q < num_query; q++) {
                 auto q0 = std::chrono::high_resolution_clock::now();
-                results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+                results[q] = hnsw->searchKnn(&query_data[q * dim], k);
                 auto q1 = std::chrono::high_resolution_clock::now();
                 batch_latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
             }
@@ -358,10 +379,10 @@ int main(int argc, char** argv) {
             }
             r.recall_hnsw = (double)correct / (num_query * k) * 100;
 
-            auto& stats = hnsw.getCacheStats();
+            auto& stats = hnsw->getCacheStats();
             r.hit_rate = stats.total_accesses > 0 ?
                 (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-            auto pf = hnsw.getGraphPrefetchStats();
+            auto pf = hnsw->getGraphPrefetchStats();
             r.pf_submitted = pf.prefetch_submitted;
             r.pf_skipped = pf.prefetch_skipped;
         r.pf_failed = pf.prefetch_failed;
@@ -386,21 +407,21 @@ int main(int argc, char** argv) {
         auto cache = std::make_unique<BlockCache>(
             blocks_path, std::move(layout), std::move(policy),
             mem_slots, dim, odirect_config);
-        DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-        hnsw.setEf(ef);
-        hnsw.enableGraphPrefetch(true);
-        hnsw.resetCacheStats();
-        if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+        auto hnsw = setupHnsw(std::move(cache));
+        
+        
+        
+        
 
         for (size_t q = 0; q < std::min(10UL, num_query); q++)
-            hnsw.searchKnn(&query_data[q * dim], k);
+            hnsw->searchKnn(&query_data[q * dim], k);
 
         std::vector<double> latencies(num_query);
         std::vector<std::vector<SearchResult>> results(num_query);
         auto t0 = std::chrono::high_resolution_clock::now();
         for (size_t q = 0; q < num_query; q++) {
             auto q0 = std::chrono::high_resolution_clock::now();
-            results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+            results[q] = hnsw->searchKnn(&query_data[q * dim], k);
             auto q1 = std::chrono::high_resolution_clock::now();
             latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
         }
@@ -418,10 +439,10 @@ int main(int argc, char** argv) {
             for (const auto& [d, id] : results[q]) if (hset.count(id)) correct++;
         }
         r.recall_hnsw = (double)correct / (num_query * k) * 100;
-        auto& stats = hnsw.getCacheStats();
+        auto& stats = hnsw->getCacheStats();
         r.hit_rate = stats.total_accesses > 0 ?
             (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-        auto pf = hnsw.getGraphPrefetchStats();
+        auto pf = hnsw->getGraphPrefetchStats();
         r.pf_submitted = pf.prefetch_submitted;
         r.pf_skipped = pf.prefetch_skipped;
         r.pf_failed = pf.prefetch_failed;
@@ -441,25 +462,25 @@ int main(int argc, char** argv) {
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
                 mem_slots, dim, odirect_config);
-            DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-            hnsw.setEf(ef);
-            hnsw.enableGraphPrefetch(true);
-            hnsw.resetCacheStats();
-            if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+            auto hnsw = setupHnsw(std::move(cache));
+            
+            
+            
+            
 
             // 设置 BEAM_WIDTH 环境变量 (searchKnn 内部读取)
             setenv("BEAM_WIDTH", std::to_string(bw).c_str(), 1);
 
             // Warmup
             for (size_t q = 0; q < std::min(10UL, num_query); q++)
-                hnsw.searchKnn(&query_data[q * dim], k);
+                hnsw->searchKnn(&query_data[q * dim], k);
 
             std::vector<double> latencies(num_query);
             std::vector<std::vector<SearchResult>> results(num_query);
             auto t0 = std::chrono::high_resolution_clock::now();
             for (size_t q = 0; q < num_query; q++) {
                 auto q0 = std::chrono::high_resolution_clock::now();
-                results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+                results[q] = hnsw->searchKnn(&query_data[q * dim], k);
                 auto q1 = std::chrono::high_resolution_clock::now();
                 latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
             }
@@ -480,10 +501,10 @@ int main(int argc, char** argv) {
                 for (const auto& [d, id] : results[q]) if (hset.count(id)) correct++;
             }
             r.recall_hnsw = (double)correct / (num_query * k) * 100;
-            auto& stats = hnsw.getCacheStats();
+            auto& stats = hnsw->getCacheStats();
             r.hit_rate = stats.total_accesses > 0 ?
                 (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-            auto pf = hnsw.getGraphPrefetchStats();
+            auto pf = hnsw->getGraphPrefetchStats();
             r.pf_submitted = pf.prefetch_submitted;
             r.pf_skipped = pf.prefetch_skipped;
             r.pf_failed = pf.prefetch_failed;
@@ -504,25 +525,25 @@ int main(int argc, char** argv) {
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
                 mem_slots, dim, odirect_config);
-            DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-            hnsw.setEf(ef);
-            hnsw.enableGraphPrefetch(true);
-            hnsw.resetCacheStats();
-            if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+            auto hnsw = setupHnsw(std::move(cache));
+            
+            
+            
+            
 
             // 设置 BATCH_IO_N 环境变量 (searchKnn 内部读取)
             setenv("BATCH_IO_N", std::to_string(bn).c_str(), 1);
 
             // Warmup
             for (size_t q = 0; q < std::min(10UL, num_query); q++)
-                hnsw.searchKnn(&query_data[q * dim], k);
+                hnsw->searchKnn(&query_data[q * dim], k);
 
             std::vector<double> latencies(num_query);
             std::vector<std::vector<SearchResult>> results(num_query);
             auto t0 = std::chrono::high_resolution_clock::now();
             for (size_t q = 0; q < num_query; q++) {
                 auto q0 = std::chrono::high_resolution_clock::now();
-                results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+                results[q] = hnsw->searchKnn(&query_data[q * dim], k);
                 auto q1 = std::chrono::high_resolution_clock::now();
                 latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
             }
@@ -543,10 +564,10 @@ int main(int argc, char** argv) {
                 for (const auto& [d, id] : results[q]) if (hset.count(id)) correct++;
             }
             r.recall_hnsw = (double)correct / (num_query * k) * 100;
-            auto& stats = hnsw.getCacheStats();
+            auto& stats = hnsw->getCacheStats();
             r.hit_rate = stats.total_accesses > 0 ?
                 (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-            auto pf = hnsw.getGraphPrefetchStats();
+            auto pf = hnsw->getGraphPrefetchStats();
             r.pf_submitted = pf.prefetch_submitted;
             r.pf_skipped = pf.prefetch_skipped;
             r.pf_failed = pf.prefetch_failed;
@@ -568,16 +589,16 @@ int main(int argc, char** argv) {
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
                 mem_slots, dim, odirect_config);
-            DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-            hnsw.setEf(ef);
-            hnsw.enableGraphPrefetch(true);
-            hnsw.resetCacheStats();
-            if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+            auto hnsw = setupHnsw(std::move(cache));
+            
+            
+            
+            
 
             // Warmup with a few queries
             std::vector<float> warmup_q(std::min(10UL, num_query) * dim);
             std::memcpy(warmup_q.data(), query_data.data(), warmup_q.size() * sizeof(float));
-            hnsw.batchSearchEventDriven(warmup_q, k, bs);
+            hnsw->batchSearchEventDriven(warmup_q, k, bs);
 
             // Timed search: batch event-driven
             // 每次处理 bs 个查询, 记录总时间和每查询延迟
@@ -590,7 +611,7 @@ int main(int argc, char** argv) {
                 size_t cur_bs = batch_end - batch_start;
 
                 auto q0 = std::chrono::high_resolution_clock::now();
-                auto batch_results = hnsw.batchSearchEventDriven(
+                auto batch_results = hnsw->batchSearchEventDriven(
                     std::vector<float>(query_data.begin() + batch_start * dim,
                                        query_data.begin() + batch_end * dim),
                     k, cur_bs);
@@ -620,10 +641,10 @@ int main(int argc, char** argv) {
             }
             r.recall_hnsw = (double)correct / (num_query * k) * 100;
 
-            auto& stats = hnsw.getCacheStats();
+            auto& stats = hnsw->getCacheStats();
             r.hit_rate = stats.total_accesses > 0 ?
                 (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-            auto pf = hnsw.getGraphPrefetchStats();
+            auto pf = hnsw->getGraphPrefetchStats();
             r.pf_submitted = pf.prefetch_submitted;
             r.pf_skipped = pf.prefetch_skipped;
             r.pf_failed = pf.prefetch_failed;
@@ -652,15 +673,15 @@ int main(int argc, char** argv) {
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
                 mem_slots, dim, odirect_config);
-            DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
-            hnsw.setEf(ef);
-            hnsw.enableGraphPrefetch(true);
-            hnsw.resetCacheStats();
-            if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+            auto hnsw = setupHnsw(std::move(cache));
+            
+            
+            
+            
 
             // Warmup (single-threaded, same as benchmark)
             for (size_t q = 0; q < std::min(10UL, num_query); q++)
-                hnsw.searchKnn(&query_data[q * dim], k);
+                hnsw->searchKnn(&query_data[q * dim], k);
 
             // Timed concurrent search
             std::vector<std::vector<SearchResult>> results(num_query);
@@ -672,7 +693,7 @@ int main(int argc, char** argv) {
                     size_t q = next_q.fetch_add(1);
                     if (q >= num_query) break;
                     auto q0 = std::chrono::high_resolution_clock::now();
-                    results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+                    results[q] = hnsw->searchKnn(&query_data[q * dim], k);
                     auto q1 = std::chrono::high_resolution_clock::now();
                     latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
                 }
@@ -700,10 +721,10 @@ int main(int argc, char** argv) {
             }
             r.recall_hnsw = (double)correct / (num_query * k) * 100;
 
-            auto& stats = hnsw.getCacheStats();
+            auto& stats = hnsw->getCacheStats();
             r.hit_rate = stats.total_accesses > 0 ?
                 (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-            auto pf = hnsw.getGraphPrefetchStats();
+            auto pf = hnsw->getGraphPrefetchStats();
             r.pf_submitted = pf.prefetch_submitted;
             r.pf_skipped = pf.prefetch_skipped;
             r.pf_failed = pf.prefetch_failed;

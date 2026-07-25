@@ -65,6 +65,9 @@ struct CachedBlock {
     uint32_t dim = 0;              // 向量维度
     uint32_t first_node_id = 0;    // Block 内第一个 node_id（BFS 重排保证连续）
 
+    // PQ 模式标记 (data_offset==0 表示无向量数据)
+    bool pq_mode = false;
+
     // ---- 预取准确率度量（纯观测，不影响搜索/recall）----
     bool was_prefetched = false;   // 是否经预取路径插入（vs 按需 miss 加载）
     bool was_accessed = false;     // 在缓存期间是否被搜索真正访问过
@@ -80,9 +83,9 @@ struct CachedBlock {
     std::vector<CachedNode> nodes;
 
     // 获取指定全局节点 ID 的向量指针
-    // 返回 nullptr 如果节点不在此 Block 中
-    // 优化：BFS 重排保证 block 内 node_id 连续，用减法替代 hash map
+    // 返回 nullptr 如果节点不在此 Block 中，或 PQ 模式下无向量
     const float* getVector(uint32_t node_id) const {
+        if (pq_mode) return nullptr;  // PQ 模式: 向量不在 block 中
         uint32_t local = node_id - first_node_id;
         if (local >= node_count) return nullptr;
         return nodes[local].vector;

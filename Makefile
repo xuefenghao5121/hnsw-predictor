@@ -29,7 +29,7 @@ $(BUILD_DIR)/test_disk_hnsw: src/test/test_disk_hnsw.cpp $(CORE_SRC) $(HEADERS) 
 
 # Default target
 all: $(BUILD_DIR)/build_index $(BUILD_DIR)/extract_graph $(BUILD_DIR)/bfs_reorder \
-     $(BUILD_DIR)/write_blocks $(BUILD_DIR)/gen_route $(BUILD_DIR)/verify \
+     $(BUILD_DIR)/write_blocks $(BUILD_DIR)/write_pq_blocks $(BUILD_DIR)/gen_route $(BUILD_DIR)/verify \
      $(BUILD_DIR)/benchmark_overlap $(BUILD_DIR)/test_block_cache $(BUILD_DIR)/test_disk_hnsw
 
 $(BUILD_DIR):
