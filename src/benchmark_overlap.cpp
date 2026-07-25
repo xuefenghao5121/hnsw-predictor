@@ -29,6 +29,8 @@
 #include <sys/resource.h>
 #include <vector>
 #include <malloc.h>
+#include <thread>
+#include <atomic>
 
 using SearchResult = std::pair<float, uint64_t>;
 
@@ -249,7 +251,7 @@ int main(int argc, char** argv) {
         auto& stats = hnsw.getCacheStats();
         r.hit_rate = stats.total_accesses > 0 ?
             (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-        auto& pf = hnsw.getGraphPrefetchStats();
+        auto pf = hnsw.getGraphPrefetchStats();
         r.pf_submitted = pf.prefetch_submitted;
         r.pf_skipped = pf.prefetch_skipped;
         r.pf_failed = pf.prefetch_failed;
@@ -311,7 +313,7 @@ int main(int argc, char** argv) {
             auto& stats = hnsw.getCacheStats();
             r.hit_rate = stats.total_accesses > 0 ?
                 (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-            auto& pf = hnsw.getGraphPrefetchStats();
+            auto pf = hnsw.getGraphPrefetchStats();
             r.pf_submitted = pf.prefetch_submitted;
             r.pf_skipped = pf.prefetch_skipped;
         r.pf_failed = pf.prefetch_failed;
@@ -366,7 +368,7 @@ int main(int argc, char** argv) {
         auto& stats = hnsw.getCacheStats();
         r.hit_rate = stats.total_accesses > 0 ?
             (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-        auto& pf = hnsw.getGraphPrefetchStats();
+        auto pf = hnsw.getGraphPrefetchStats();
         r.pf_submitted = pf.prefetch_submitted;
         r.pf_skipped = pf.prefetch_skipped;
         r.pf_failed = pf.prefetch_failed;
@@ -427,7 +429,7 @@ int main(int argc, char** argv) {
             auto& stats = hnsw.getCacheStats();
             r.hit_rate = stats.total_accesses > 0 ?
                 (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
-            auto& pf = hnsw.getGraphPrefetchStats();
+            auto pf = hnsw.getGraphPrefetchStats();
             r.pf_submitted = pf.prefetch_submitted;
             r.pf_skipped = pf.prefetch_skipped;
             r.pf_failed = pf.prefetch_failed;
@@ -436,6 +438,165 @@ int main(int argc, char** argv) {
         }
         malloc_trim(0);
     }
+
+    // ---- F2-event: Event-driven multi-query concurrency ----
+    // 测试 event-driven batch search: batch=4, batch=8
+    for (size_t bs : {4, 8}) {
+        if (bs > num_query) continue;
+        std::cout << "\n[F2-event-" << bs << "] c" << mem256_slots << "+GP, event-driven (bs=" << bs << ")..." << std::endl;
+        {
+            auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
+            auto policy = std::make_unique<LRUPolicy>();
+            auto cache = std::make_unique<BlockCache>(
+                blocks_path, std::move(layout), std::move(policy),
+                mem256_slots, dim, odirect_config);
+            DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
+            hnsw.setEf(ef);
+            hnsw.enableGraphPrefetch(true);
+            hnsw.resetCacheStats();
+            if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+
+            // Warmup with a few queries
+            std::vector<float> warmup_q(std::min(10UL, num_query) * dim);
+            std::memcpy(warmup_q.data(), query_data.data(), warmup_q.size() * sizeof(float));
+            hnsw.batchSearchEventDriven(warmup_q, k, bs);
+
+            // Timed search: batch event-driven
+            // 每次处理 bs 个查询, 记录总时间和每查询延迟
+            std::vector<double> latencies(num_query);
+            std::vector<std::vector<SearchResult>> results(num_query);
+
+            auto t0 = std::chrono::high_resolution_clock::now();
+            for (size_t batch_start = 0; batch_start < num_query; batch_start += bs) {
+                size_t batch_end = std::min(batch_start + bs, num_query);
+                size_t cur_bs = batch_end - batch_start;
+
+                auto q0 = std::chrono::high_resolution_clock::now();
+                auto batch_results = hnsw.batchSearchEventDriven(
+                    std::vector<float>(query_data.begin() + batch_start * dim,
+                                       query_data.begin() + batch_end * dim),
+                    k, cur_bs);
+                auto q1 = std::chrono::high_resolution_clock::now();
+
+                double batch_us = std::chrono::duration<double, std::micro>(q1 - q0).count();
+                double per_query_us = batch_us / cur_bs;
+                for (size_t i = 0; i < cur_bs; i++) {
+                    latencies[batch_start + i] = per_query_us;
+                    results[batch_start + i] = std::move(batch_results[i]);
+                }
+            }
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double total_s = std::chrono::duration<double>(t1 - t0).count();
+
+            BenchResult r;
+            r.name = "F2-event-" + std::to_string(bs) + ": c" + std::to_string(mem256_slots) + "+GP (256MB)";
+            r.lat = computeLatency(latencies);
+            r.qps = num_query / total_s;
+            r.rss_mb = getRSS_MB();
+
+            size_t correct = 0;
+            for (size_t q = 0; q < num_query; q++) {
+                std::set<uint64_t> hset;
+                for (const auto& [d, id] : hnsw_baseline[q]) hset.insert(id);
+                for (const auto& [d, id] : results[q]) if (hset.count(id)) correct++;
+            }
+            r.recall_hnsw = (double)correct / (num_query * k) * 100;
+
+            auto& stats = hnsw.getCacheStats();
+            r.hit_rate = stats.total_accesses > 0 ?
+                (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
+            auto pf = hnsw.getGraphPrefetchStats();
+            r.pf_submitted = pf.prefetch_submitted;
+            r.pf_skipped = pf.prefetch_skipped;
+            r.pf_failed = pf.prefetch_failed;
+
+            printResult(r);
+            all_results.push_back(r);
+        }
+        malloc_trim(0);
+    }
+
+    // ---- F2-concurrent: multi-threaded concurrent search ----
+    // Tests 4 configs: concurrent-4-nb, concurrent-8-nb, concurrent-4, concurrent-8
+    for (auto& [nt, nb] : std::vector<std::pair<int,int>>{{4,1},{8,1},{4,0},{8,0}}) {
+        std::string config_name = "F2-concurrent-" + std::to_string(nt) + (nb ? "-nb" : "");
+        std::cout << "\n[" << config_name << "] c" << mem256_slots << "+GP, " << nt
+                  << " threads, " << (nb ? "non-blocking" : "blocking") << "..." << std::endl;
+
+        // Set NONBLOCK env var
+        if (nb) setenv("NONBLOCK", "1", 1);
+        else setenv("NONBLOCK", "0", 1);
+
+        {
+            auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
+            auto policy = std::make_unique<LRUPolicy>();
+            auto cache = std::make_unique<BlockCache>(
+                blocks_path, std::move(layout), std::move(policy),
+                mem256_slots, dim, odirect_config);
+            DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
+            hnsw.setEf(ef);
+            hnsw.enableGraphPrefetch(true);
+            hnsw.resetCacheStats();
+            if (hnsw.isGraphPrefetchEnabled()) hnsw.resetGraphPrefetchStats();
+
+            // Warmup (single-threaded, same as benchmark)
+            for (size_t q = 0; q < std::min(10UL, num_query); q++)
+                hnsw.searchKnn(&query_data[q * dim], k);
+
+            // Timed concurrent search
+            std::vector<std::vector<SearchResult>> results(num_query);
+            std::atomic<size_t> next_q{0};
+            std::vector<double> latencies(num_query);
+
+            auto worker = [&]() {
+                while (true) {
+                    size_t q = next_q.fetch_add(1);
+                    if (q >= num_query) break;
+                    auto q0 = std::chrono::high_resolution_clock::now();
+                    results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+                    auto q1 = std::chrono::high_resolution_clock::now();
+                    latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
+                }
+            };
+
+            std::vector<std::thread> threads;
+            threads.reserve(nt);
+            auto t0 = std::chrono::high_resolution_clock::now();
+            for (int i = 0; i < nt; i++) threads.emplace_back(worker);
+            for (auto& t : threads) t.join();
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double total_s = std::chrono::duration<double>(t1 - t0).count();
+
+            BenchResult r;
+            r.name = config_name + ": c" + std::to_string(mem256_slots) + "+GP (256MB)";
+            r.lat = computeLatency(latencies);
+            r.qps = num_query / total_s;
+            r.rss_mb = getRSS_MB();
+
+            size_t correct = 0;
+            for (size_t q = 0; q < num_query; q++) {
+                std::set<uint64_t> hset;
+                for (const auto& [d, id] : hnsw_baseline[q]) hset.insert(id);
+                for (const auto& [d, id] : results[q]) if (hset.count(id)) correct++;
+            }
+            r.recall_hnsw = (double)correct / (num_query * k) * 100;
+
+            auto& stats = hnsw.getCacheStats();
+            r.hit_rate = stats.total_accesses > 0 ?
+                (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
+            auto pf = hnsw.getGraphPrefetchStats();
+            r.pf_submitted = pf.prefetch_submitted;
+            r.pf_skipped = pf.prefetch_skipped;
+            r.pf_failed = pf.prefetch_failed;
+
+            printResult(r);
+            all_results.push_back(r);
+        }
+        malloc_trim(0);
+    }
+
+    // Restore NONBLOCK env
+    unsetenv("NONBLOCK");
 
     // Summary
     std::cout << "\n\n=== SUMMARY ===" << std::endl;

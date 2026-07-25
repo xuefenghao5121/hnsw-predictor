@@ -1,4 +1,7 @@
 // graph_prefetcher.cpp - 图引导 io_uring 异步预取器实现
+//
+// 线程安全版本: 所有公共方法通过 std::mutex 串行化
+// 关键设计: ring_.waitCompletion() 不持有锁，允许其他线程并发 submit
 
 #include "graph_prefetcher.h"
 
@@ -27,17 +30,18 @@ GraphPrefetcher::GraphPrefetcher(BlockCache* cache, unsigned ring_size, bool use
 
 GraphPrefetcher::~GraphPrefetcher() {
     // 时效性报告: 搜索需要 block 时它处于何种状态
-    size_t t = stats_.need_timely;
-    size_t f = stats_.need_inflight;
-    size_t n = stats_.need_not_prefetched;
+    Stats s = getStats();
+    size_t t = s.need_timely;
+    size_t f = s.need_inflight;
+    size_t n = s.need_not_prefetched;
     size_t tot = t + f + n;
     if (tot > 0) {
         std::cerr << "[Prefetch Timeliness] need_total=" << tot
                   << " timely=" << t << "(" << (100.0*t/tot) << "%)"
                   << " inflight=" << f << "(" << (100.0*f/tot) << "%)"
                   << " not_prefetched=" << n << "(" << (100.0*n/tot) << "%)"
-                  << " | wait_calls=" << stats_.wait_calls
-                  << " total_wait_us=" << stats_.total_wait_us
+                  << " | wait_calls=" << s.wait_calls
+                  << " total_wait_us=" << s.total_wait_us
                   << std::endl;
     }
 }
@@ -46,6 +50,8 @@ int GraphPrefetcher::submitPrefetch(const std::vector<uint32_t>& block_ids, bool
     if (block_ids.empty()) return 0;
 
     auto t0 = std::chrono::high_resolution_clock::now();
+
+    std::lock_guard<std::mutex> lock(mutex_);
 
     // 优化：批量检查缓存，一次加锁替代 N 次加锁
     // 先过滤掉已在缓存中的 block
@@ -62,8 +68,8 @@ int GraphPrefetcher::submitPrefetch(const std::vector<uint32_t>& block_ids, bool
         // 分配对齐缓冲区
         int buf_idx = ring_.allocBuffer();
         if (buf_idx < 0) {
-            // 缓冲区池耗尽，先回收一些
-            reapCompletions();
+            // 缓冲区池耗尽，先回收一些（内部不加锁）
+            reapCompletionsUnlocked();
             buf_idx = ring_.allocBuffer();
             if (buf_idx < 0) {
                 // 仍然没有，回退到同步加载（不静默跳过）
@@ -105,6 +111,7 @@ int GraphPrefetcher::submitPrefetch(const std::vector<uint32_t>& block_ids, bool
 }
 
 void GraphPrefetcher::flushSubmits() {
+    std::lock_guard<std::mutex> lock(mutex_);
     // submit() 内部会检查 pending SQEs, 无 pending 时返回 0
     int ret = ring_.submit();
     if (ret > 0) {
@@ -113,6 +120,11 @@ void GraphPrefetcher::flushSubmits() {
 }
 
 int GraphPrefetcher::reapCompletions() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return reapCompletionsUnlocked();
+}
+
+int GraphPrefetcher::reapCompletionsUnlocked() {
     auto t0 = std::chrono::high_resolution_clock::now();
 
     std::vector<IoUring::CqeResult> results;
@@ -152,6 +164,8 @@ int GraphPrefetcher::reapCompletions() {
     }
 
     // 批量插入：锁外 parse + 一次加锁 insert
+    // 注意: 调用 BlockCache 时持有 prefetcher mutex, 锁序: prefetcher -> cache
+    // BlockCache 不会回调 prefetcher, 无死锁风险
     if (!batch_entries.empty()) {
         cache_->insertBlocksBatch(batch_entries);
     }
@@ -174,7 +188,12 @@ void GraphPrefetcher::waitForCompletions(uint64_t max_wait_us) {
     reapCompletions();
 
     // 如果还有未完成的，等待
-    while (ring_.inflight() > 0) {
+    while (true) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (ring_.inflight() == 0) break;
+        }
+
         if (max_wait_us > 0) {
             auto elapsed = std::chrono::duration<double, std::micro>(
                 std::chrono::high_resolution_clock::now() - t0).count();
@@ -183,12 +202,17 @@ void GraphPrefetcher::waitForCompletions(uint64_t max_wait_us) {
             }
         }
 
+        // 等待 completion（不持有锁，允许其他线程 submit）
         ring_.waitCompletion();
-        stats_.wait_calls++;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stats_.wait_calls++;
+        }
         reapCompletions();
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
+    std::lock_guard<std::mutex> lock(mutex_);
     stats_.total_wait_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
 }
 
@@ -200,11 +224,13 @@ bool GraphPrefetcher::waitForBlock(uint32_t block_id) {
         return true;
     }
 
-    // 检查是否已完成但未在缓存（不应该发生，因为 processCompletion 会插入缓存）
-    // 如果不在 pending_requests_ 中，说明该 block 没有被提交预取
-    if (pending_requests_.find((uint64_t)block_id) == pending_requests_.end()) {
-        // 没有提交预取，直接返回 false
-        return false;
+    // 检查是否有 pending 请求
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (pending_requests_.find((uint64_t)block_id) == pending_requests_.end()) {
+            // 没有提交预取，直接返回 false
+            return false;
+        }
     }
 
     // 等待该 block 完成：循环 wait+reap 直到该 block 出现在缓存中
@@ -214,29 +240,36 @@ bool GraphPrefetcher::waitForBlock(uint32_t block_id) {
 
         if (cache_->isInCache(block_id)) {
             auto t1 = std::chrono::high_resolution_clock::now();
+            std::lock_guard<std::mutex> lock(mutex_);
             stats_.total_wait_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
             return true;
         }
 
         // 检查是否仍在 pending（可能已 reap 但失败了）
-        if (pending_requests_.find((uint64_t)block_id) == pending_requests_.end()) {
-            // 不在 pending 了但也不在缓存 -> 读取失败
-            auto t1 = std::chrono::high_resolution_clock::now();
-            stats_.total_wait_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
-            return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pending_requests_.find((uint64_t)block_id) == pending_requests_.end()) {
+                // 不在 pending 了但也不在缓存 -> 读取失败
+                auto t1 = std::chrono::high_resolution_clock::now();
+                stats_.total_wait_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
+                return false;
+            }
+            if (ring_.inflight() == 0) {
+                // 没有 inflight 但 block 仍在 pending？不应该发生
+                break;
+            }
         }
 
-        // 还有 inflight，等待至少一个完成
-        if (ring_.inflight() > 0) {
-            ring_.waitCompletion();
+        // 等待至少一个 completion（不持有锁）
+        ring_.waitCompletion();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
             stats_.wait_calls++;
-        } else {
-            // 没有 inflight 但 block 仍在 pending？不应该发生
-            break;
         }
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
+    std::lock_guard<std::mutex> lock(mutex_);
     stats_.total_wait_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
     return cache_->isInCache(block_id);
 }
@@ -246,17 +279,20 @@ void GraphPrefetcher::waitForBlocks(const std::set<uint32_t>& needed_blocks) {
 
     // 筛选出仍在 pending 中的 block
     std::set<uint32_t> pending;
-    for (uint32_t id : needed_blocks) {
-        bool in_cache = cache_->isInCache(id);
-        bool in_flight = pending_requests_.count((uint64_t)id) > 0;
-        // 时效性分类（搜索需要此 block 时的状态）
-        if (in_cache) {
-            stats_.need_timely++;           // 预取已到位, 完全藏住
-        } else if (in_flight) {
-            stats_.need_inflight++;         // 预取在途, 得等
-            pending.insert(id);
-        } else {
-            stats_.need_not_prefetched++;   // 未预取, 纯同步 miss
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (uint32_t id : needed_blocks) {
+            bool in_cache = cache_->isInCache(id);
+            bool in_flight = pending_requests_.count((uint64_t)id) > 0;
+            // 时效性分类（搜索需要此 block 时的状态）
+            if (in_cache) {
+                stats_.need_timely++;           // 预取已到位, 完全藏住
+            } else if (in_flight) {
+                stats_.need_inflight++;         // 预取在途, 得等
+                pending.insert(id);
+            } else {
+                stats_.need_not_prefetched++;   // 未预取, 纯同步 miss
+            }
         }
     }
 
@@ -269,28 +305,35 @@ void GraphPrefetcher::waitForBlocks(const std::set<uint32_t>& needed_blocks) {
         // 非阻塞 reap
         reapCompletions();
 
-        // 移除已完成的 block
-        for (auto it = pending.begin(); it != pending.end();) {
-            if (cache_->isInCache(*it) || !pending_requests_.count((uint64_t)*it)) {
-                it = pending.erase(it);
-            } else {
-                ++it;
+        // 检查哪些已完成
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto it = pending.begin(); it != pending.end();) {
+                if (cache_->isInCache(*it) || !pending_requests_.count((uint64_t)*it)) {
+                    it = pending.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+
+            if (pending.empty()) break;
+
+            if (ring_.inflight() == 0) {
+                // 没有 inflight 但还有 pending? 不应该发生
+                break;
             }
         }
 
-        if (pending.empty()) break;
-
-        // 等待至少一个 completion
-        if (ring_.inflight() > 0) {
-            ring_.waitCompletion();
+        // 等待至少一个 completion（不持有锁，允许其他线程并发 submit/reap）
+        ring_.waitCompletion();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
             stats_.wait_calls++;
-        } else {
-            // 没有 inflight 但还有 pending? 不应该发生
-            break;
         }
     }
 
     auto t1 = std::chrono::high_resolution_clock::now();
+    std::lock_guard<std::mutex> lock(mutex_);
     stats_.total_wait_us += std::chrono::duration<double, std::micro>(t1 - t0).count();
 }
 
@@ -322,4 +365,21 @@ void GraphPrefetcher::processCompletion(uint64_t user_data, int32_t res) {
     ring_.freeBuffer(buf_idx);
 
     stats_.prefetch_completed++;
+}
+
+// ---- 线程安全的统计/状态接口 ----
+
+unsigned GraphPrefetcher::inflight() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return ring_.inflight();
+}
+
+GraphPrefetcher::Stats GraphPrefetcher::getStats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return stats_;  // 返回拷贝，避免外部访问期间数据竞争
+}
+
+void GraphPrefetcher::resetStats() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stats_ = Stats{};
 }

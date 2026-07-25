@@ -24,6 +24,7 @@
 #include <unordered_map>
 #include <set>
 #include <memory>
+#include <mutex>
 
 class GraphPrefetcher {
 public:
@@ -86,11 +87,11 @@ public:
     void waitForBlocks(const std::set<uint32_t>& needed_blocks);
 
     // 获取当前未完成的请求数
-    unsigned inflight() const { return ring_.inflight(); }
+    unsigned inflight() const;
 
     // 统计
-    const Stats& getStats() const { return stats_; }
-    void resetStats() { stats_ = Stats{}; }
+    Stats getStats() const;
+    void resetStats();
 
 private:
     BlockCache* cache_;
@@ -108,7 +109,11 @@ private:
 
     Stats stats_;
 
-    // 内部方法
+    // ---- 线程安全 ----
+    mutable std::mutex mutex_;
+
+    // 内部方法（调用者必须持有 mutex_）
+    int reapCompletionsUnlocked();
     int allocBufferForBlock(uint32_t block_id);
     void processCompletion(uint64_t user_data, int32_t res);
 

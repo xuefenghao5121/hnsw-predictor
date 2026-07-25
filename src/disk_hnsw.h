@@ -64,13 +64,39 @@ public:
     // 搜索结果类型: (distance, label)
     using SearchResult = std::pair<float, uint64_t>;
 
+    // ---- 查询状态机 (事件驱动批量搜索) ----
+    struct QueryState {
+        uint32_t query_id = 0;
+        const float* query = nullptr;
+        size_t k = 0;
+        size_t ef = 0;
+
+        // candidate_set: 最小堆, 距离小的优先展开
+        std::priority_queue<std::pair<float, uint32_t>,
+                            std::vector<std::pair<float, uint32_t>>,
+                            std::greater<std::pair<float, uint32_t>>> candidate_set;
+        // top_candidates: 最大堆, 距离大的在堆顶方便淘汰
+        std::priority_queue<std::pair<float, uint32_t>,
+                            std::vector<std::pair<float, uint32_t>>,
+                            std::less<std::pair<float, uint32_t>>> top_candidates;
+        std::unique_ptr<VisitedList> visited;
+        float lowerBound = 0.0f;
+
+        // 调度状态
+        bool done = false;
+        uint32_t waitingBlockId = 0;  // 正在等待的 block (0=不需要等待)
+        bool entryLoaded = false;     // 入口节点是否已加载
+        uint32_t entryNewId = 0;      // Layer 0 入口 (new_id)
+
+        // deferred 邻居列表: block 不在缓存的邻居, 等 I/O 完成后处理
+        struct DeferredNeighbor {
+            uint32_t neighborId;
+            uint32_t blockId;
+        };
+        std::vector<DeferredNeighbor> deferred;
+    };
+
     // 构造函数（原始接口，向后兼容）
-    // graph_path:  graph_structure.bin 路径
-    // bfs_path:    bfs_order.bin 路径
-    // blocks_path: blocks.bin 路径
-    // route_path:  route_table.bin 路径
-    // cache_slots: BlockCache最大缓存槽位数
-    // dim:         向量维度
     DiskHNSW(const std::string& graph_path,
              const std::string& bfs_path,
              const std::string& blocks_path,
@@ -79,9 +105,6 @@ public:
              uint32_t dim = 128);
 
     // 构造函数（可插拔接口，接受外部构造的 BlockCache）
-    // graph_path:  graph_structure.bin 路径
-    // bfs_path:    bfs_order.bin 路径
-    // cache:       外部构造的 BlockCache（使用可插拔 LayoutProvider + ReplacementPolicy）
     DiskHNSW(const std::string& graph_path,
              const std::string& bfs_path,
              std::unique_ptr<BlockCache> cache);
@@ -93,9 +116,18 @@ public:
     size_t getEf() const { return ef_search_; }
 
     // KNN搜索
-    // 返回按距离排序的 top-k 结果 (距离从小到大)
     std::vector<SearchResult> searchKnn(const float* query, size_t k);
     std::vector<std::vector<SearchResult>> batchSearch(const std::vector<float>& queries, size_t k, size_t batch_size = 8);
+
+    // 事件驱动批量搜索 (单线程多查询并发)
+    // 查询 A 阻塞 I/O 时切换到查询 B, 无锁竞争
+    std::vector<std::vector<SearchResult>>
+    batchSearchEventDriven(const std::vector<float>& queries, size_t k, size_t batch_size = 4);
+
+    // 并发批量搜索 (多线程, 共享 BlockCache 和 GraphPrefetcher)
+    // num_threads: 并发线程数
+    std::vector<std::vector<SearchResult>>
+    batchSearchConcurrent(const std::vector<float>& queries, size_t k, size_t num_threads);
 
     // 获取缓存统计信息
     const BlockCache::Stats& getCacheStats() const { return cache_->getStats(); }
@@ -107,17 +139,10 @@ public:
     void dropPageCache() { cache_->dropPageCache(); }
 
     // ---- Phase 3a: 查询间预取 ----
-
-    // 记录当前查询访问的所有 unique block IDs
-    // 在搜索过程中通过 trace callback 自动收集
     void startRecordingBlocks() { recorded_blocks_.clear(); recording_ = true; }
     void stopRecordingBlocks() { recording_ = false; }
     const std::set<uint32_t>& getRecordedBlocks() const { return recorded_blocks_; }
 
-    // 预取最近 N 个查询的 Block 并集
-    // 在下一个查询开始前调用
-    // 方式: posix_fadvise(WILLNEED) 预热 page cache, 不进 BlockCache
-    // 返回预取的 block 数
     size_t prefetchRecentBlocks(const std::vector<std::set<uint32_t>>& recent_sets, size_t n) {
         std::set<uint32_t> union_set;
         size_t start = recent_sets.size() > n ? recent_sets.size() - n : 0;
@@ -130,7 +155,6 @@ public:
         size_t header = cache_->getHeaderSize();
         uint32_t bs = cache_->getBlockSizeBytes();
         for (uint32_t block_id : union_set) {
-            // 用 fadvise(WILLNEED) 预热 page cache, 不污染 BlockCache
             off_t offset = (off_t)header + (off_t)block_id * bs;
             posix_fadvise(fd, offset, bs, POSIX_FADV_WILLNEED);
             loaded++;
@@ -153,21 +177,10 @@ public:
     uint32_t newToOld(uint32_t new_id) const { return new_to_old_[new_id]; }
 
     // ---- Phase 3 Redesign: 图引导预取支持 ----
-
-    // 启用图引导预取（io_uring 异步批量预取）
-    // use_odirect: 是否使用 O_DIRECT 模式
     void enableGraphPrefetch(bool use_odirect = true);
-
-    // 禁用图引导预取
     void disableGraphPrefetch();
-
-    // 是否已启用图引导预取
     bool isGraphPrefetchEnabled() const { return graph_prefetch_enabled_; }
-
-    // 获取图引导预取统计
-    const GraphPrefetcher::Stats& getGraphPrefetchStats() const;
-
-    // 重置图引导预取统计
+    GraphPrefetcher::Stats getGraphPrefetchStats() const;
     void resetGraphPrefetchStats();
 
     // ---- Phase 3: 轨迹采集 ----
@@ -176,76 +189,55 @@ public:
 
 private:
     // ---- 图数据（常驻内存，old_id空间）----
-    GraphStructure graph_;          // 从graph_structure.bin加载
-    uint32_t dim_;                  // 向量维度
-    size_t ef_search_;              // ef参数
+    GraphStructure graph_;
+    uint32_t dim_;
+    size_t ef_search_;
 
     // ---- BFS映射 ----
-    std::vector<uint32_t> old_to_new_;  // old_id -> new_id
-    std::vector<uint32_t> new_to_old_;  // new_id -> old_id (bfs_order)
+    std::vector<uint32_t> old_to_new_;
+    std::vector<uint32_t> new_to_old_;
 
     // ---- BlockCache（new_id空间）----
     std::unique_ptr<BlockCache> cache_;
-
-    // 缓存配置信息（从 cache_ 获取后保存，用于日志）
     size_t cache_slots_ = 0;
 
     // ---- Phase 3 Redesign: 图引导预取器 ----
     std::unique_ptr<GraphPrefetcher> graph_prefetcher_;
-
-    // Block 热度评价器
     std::unique_ptr<BlockHeatEvaluator> heat_evaluator_;
     bool graph_prefetch_enabled_ = false;
 
     // ---- Phase 3 CPU Opt: 路由表缓存 ----
-    // 直接引用路由表，避免每次 getBlockId 的虚函数调用
     const std::vector<uint32_t>* route_table_ = nullptr;
 
     // ---- Phase 3a: 查询间预取 ----
     bool recording_ = false;
     std::set<uint32_t> recorded_blocks_;
 
-    // ---- 访问标记 ----
-    // 每次搜索创建新的VisitedList，不需要线程安全
-    // 使用new_id空间标记
-
     // ---- 距离计算 ----
-    // L2距离，使用hnswlib的优化实现
-    size_t dim_param_;                  // 用于dist_func_param
+    size_t dim_param_;
     float l2Distance(const float* a, const float* b) const;
 
     // ---- 搜索内部方法 ----
-
-    // 贪心下降：从enterpoint通过上层到达Layer 0的入口点
-    // 使用内存中的图数据（old_id空间）
-    // 返回: Layer 0入口点的old_id
     uint32_t greedyDescent(const float* query);
 
-    // Layer 0 搜索（BlockCache按需加载，new_id空间）
-    // entry_new_id: Layer 0入口点的new_id
-    // 返回: top_candidates (distance, new_id)
     std::priority_queue<std::pair<float, uint32_t>,
                         std::vector<std::pair<float, uint32_t>>,
                         std::greater<std::pair<float, uint32_t>>>
     searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
                  VisitedList& visited);
 
-    // 非阻塞 Layer 0 搜索 (I/O overlap 优化)
     std::priority_queue<std::pair<float, uint32_t>,
                         std::vector<std::pair<float, uint32_t>>,
                         std::greater<std::pair<float, uint32_t>>>
     searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, size_t ef,
                             VisitedList& visited);
 
-    // Cache-Aware Beam Search (beam round 内 lowerBound 冻结)
-    // beam_width: 每轮弹出的候选数 (B), B=1 退化为标准 best-first
     std::priority_queue<std::pair<float, uint32_t>,
                         std::vector<std::pair<float, uint32_t>>,
                         std::greater<std::pair<float, uint32_t>>>
     searchLayer0Beam(uint32_t entry_new_id, const float* query, size_t ef,
                      VisitedList& visited, int beam_width);
 
-    // beam search 内部: 展开单个候选的邻居 (使用 frozenLB 过滤)
     void expandBeamCandidate(uint32_t nodeId, uint32_t blockId,
                              const float* query, size_t ef, float frozenLB,
                              std::priority_queue<std::pair<float, uint32_t>,
@@ -256,4 +248,8 @@ private:
                                  std::greater<std::pair<float, uint32_t>>>& candidate_set,
                              VisitedList& visited,
                              const std::function<uint32_t(uint32_t)>& getBlockIdFast);
+
+    // ---- 事件驱动批量搜索内部方法 ----
+    void initQueryState(QueryState& qs, const float* query, size_t k, size_t ef);
+    void stepQueryState(QueryState& qs);
 };
