@@ -26,6 +26,7 @@
 #include <mutex>
 #include <atomic>
 #include <set>
+#include <functional>
 #include <fcntl.h>
 
 // ============================================================
@@ -235,4 +236,24 @@ private:
                         std::greater<std::pair<float, uint32_t>>>
     searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, size_t ef,
                             VisitedList& visited);
+
+    // Cache-Aware Beam Search (beam round 内 lowerBound 冻结)
+    // beam_width: 每轮弹出的候选数 (B), B=1 退化为标准 best-first
+    std::priority_queue<std::pair<float, uint32_t>,
+                        std::vector<std::pair<float, uint32_t>>,
+                        std::greater<std::pair<float, uint32_t>>>
+    searchLayer0Beam(uint32_t entry_new_id, const float* query, size_t ef,
+                     VisitedList& visited, int beam_width);
+
+    // beam search 内部: 展开单个候选的邻居 (使用 frozenLB 过滤)
+    void expandBeamCandidate(uint32_t nodeId, uint32_t blockId,
+                             const float* query, size_t ef, float frozenLB,
+                             std::priority_queue<std::pair<float, uint32_t>,
+                                 std::vector<std::pair<float, uint32_t>>,
+                                 std::less<std::pair<float, uint32_t>>>& top_candidates,
+                             std::priority_queue<std::pair<float, uint32_t>,
+                                 std::vector<std::pair<float, uint32_t>>,
+                                 std::greater<std::pair<float, uint32_t>>>& candidate_set,
+                             VisitedList& visited,
+                             const std::function<uint32_t(uint32_t)>& getBlockIdFast);
 };
