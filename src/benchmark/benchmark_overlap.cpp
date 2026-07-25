@@ -1,14 +1,18 @@
 // benchmark_overlap.cpp - I/O overlap benchmark
 //
-// Tests 4 modes:
-//   F0: Full-memory (baseline)
-//   F2-single: c1024+GP, single query, blocking search (original)
-//   F2-nonblock: c1024+GP, single query, non-blocking search (new)
-//   F2-batch: c1024+GP, batch query, non-blocking search (new)
+// Tests:
+//   F0: hnswlib native full-memory (true baseline, no block framework)
+//   F2-single: c1024+GP, single query, blocking search
+//   F2-batch: c1024+GP, batch query, non-blocking search
+//   F2-event: event-driven batch search
+//   F2-concurrent: multi-threaded concurrent search
 //
 // Usage:
 //   ./benchmark_overlap <graph> <bfs> <blocks> <route> <data> <query> <gt> [k=10] [ef=50] [num_queries=200]
+//   Env: INDEX_PATH=<hnswlib_index.bin>  (required for F0 baseline)
+//        CACHE_MB=<cache_size_mb>  (default 256)
 
+#include "hnswlib/hnswlib.h"
 #include "common.h"
 #include "block_cache.h"
 #include "layout_provider.h"
@@ -120,12 +124,20 @@ int main(int argc, char** argv) {
     std::cout << "=== I/O Overlap Benchmark ===" << std::endl;
     std::cout << "k=" << k << ", ef=" << ef << ", num_queries=" << num_queries << std::endl;
 
-    // Load data
+    // Load data (header only for base, full for queries)
     int dim;
     size_t num_base, num_query;
-    auto base_data = read_fvecs(data_path, dim, num_base);
+    // base_data 不需要加载, 只需要 dim 和 num_base
+    {
+        std::ifstream in(data_path, std::ios::binary);
+        int32_t d; in.read(reinterpret_cast<char*>(&d), sizeof(int32_t));
+        dim = d;
+        in.seekg(0, std::ios::end);
+        size_t file_size = in.tellg();
+        size_t record_size = sizeof(int32_t) + dim * sizeof(float);
+        num_base = file_size / record_size;
+    }
     auto query_data = read_fvecs(query_path, dim, num_query);
-    std::vector<float>().swap(base_data);
 
     if (num_queries > num_query) num_queries = num_query;
     query_data.resize(num_queries * dim);
@@ -142,14 +154,45 @@ int main(int argc, char** argv) {
     uint32_t block_size = bfhdr.block_size;
     std::cout << "Blocks: " << num_blocks << ", block_size=" << block_size << std::endl;
 
-    // Build HNSW baseline
-    std::cout << "\n[1] Building HNSW baseline..." << std::endl;
+    // Build HNSW baseline using hnswlib native (true full-memory)
+    // F0 baseline: 加载 hnswlib 原生索引 (可被 SKIP_F0=1 跳过)
+    bool skip_f0 = std::getenv("SKIP_F0") != nullptr;
+    hnswlib::HierarchicalNSW<float>* hnsw_alg = nullptr;
     std::vector<std::vector<SearchResult>> hnsw_baseline;
-    {
-        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, num_blocks, dim);
-        hnsw.setEf(ef);
-        for (size_t q = 0; q < num_query; q++)
-            hnsw_baseline.push_back(hnsw.searchKnn(&query_data[q * dim], k));
+    if (!skip_f0) {
+        const char* index_path_env = std::getenv("INDEX_PATH");
+        if (!index_path_env) {
+            std::cerr << "ERROR: INDEX_PATH env var required (or set SKIP_F0=1)" << std::endl;
+            return 1;
+        }
+        std::cout << "\n[1] Loading hnswlib index (native baseline)..." << std::endl;
+        hnswlib::L2Space hnsw_space(dim);
+        auto load_t0 = std::chrono::high_resolution_clock::now();
+        hnsw_alg = new hnswlib::HierarchicalNSW<float>(&hnsw_space, std::string(index_path_env));
+        hnsw_alg->setEf(ef);
+        auto load_t1 = std::chrono::high_resolution_clock::now();
+        std::cout << "  hnswlib index loaded in " << std::chrono::duration<double>(load_t1 - load_t0).count() << "s" << std::endl;
+        std::cout << "  RSS after load: " << getRSS_MB() << " MB" << std::endl;
+
+        for (size_t q = 0; q < num_query; q++) {
+            auto result = hnsw_alg->searchKnn(&query_data[q * dim], k);
+            std::vector<SearchResult> sr;
+            while (!result.empty()) {
+                auto& [dist, id] = result.top();
+                sr.push_back({(float)dist, (uint32_t)id});
+                result.pop();
+            }
+            hnsw_baseline.push_back(std::move(sr));
+        }
+    } else {
+        std::cout << "\n[1] SKIP_F0=1, using ann-benchmarks GT as recall reference" << std::endl;
+        // 用 GT 构造 baseline, 这样 F2 的 recall 计算不需要 hnswlib
+        hnsw_baseline.resize(num_query);
+        for (size_t q = 0; q < num_query; q++) {
+            for (size_t i = 0; i < (size_t)k && i < gt_data[q].size(); i++) {
+                hnsw_baseline[q].push_back({0.0f, (uint32_t)gt_data[q][i]});
+            }
+        }
     }
 
     IOConfig odirect_config;
@@ -158,16 +201,12 @@ int main(int argc, char** argv) {
 
     std::vector<BenchResult> all_results;
 
-    // ---- F0: Full-memory ----
-    std::cout << "\n[F0] Full-memory..." << std::endl;
-    {
-        DiskHNSW hnsw(graph_path, bfs_path, blocks_path, route_path, num_blocks, dim);
-        hnsw.setEf(ef);
-        hnsw.resetCacheStats();
-
+    // ---- F0: hnswlib native (skip if SKIP_F0) ----
+    if (!skip_f0) {
+    std::cout << "\n[F0] hnswlib native (full-memory)..." << std::endl;
         // Warmup
         for (size_t q = 0; q < std::min(10UL, num_query); q++)
-            hnsw.searchKnn(&query_data[q * dim], k);
+            hnsw_alg->searchKnn(&query_data[q * dim], k);
 
         std::vector<double> latencies(num_query);
         std::vector<std::vector<SearchResult>> results(num_query);
@@ -175,15 +214,20 @@ int main(int argc, char** argv) {
         auto t0 = std::chrono::high_resolution_clock::now();
         for (size_t q = 0; q < num_query; q++) {
             auto q0 = std::chrono::high_resolution_clock::now();
-            results[q] = hnsw.searchKnn(&query_data[q * dim], k);
+            auto raw = hnsw_alg->searchKnn(&query_data[q * dim], k);
             auto q1 = std::chrono::high_resolution_clock::now();
             latencies[q] = std::chrono::duration<double, std::micro>(q1 - q0).count();
+            while (!raw.empty()) {
+                auto& [dist, id] = raw.top();
+                results[q].push_back({(float)dist, (uint32_t)id});
+                raw.pop();
+            }
         }
         auto t1 = std::chrono::high_resolution_clock::now();
         double total_s = std::chrono::duration<double>(t1 - t0).count();
 
         BenchResult r;
-        r.name = "F0: Full-mem";
+        r.name = "F0: hnswlib-native";
         r.lat = computeLatency(latencies);
         r.qps = num_query / total_s;
         r.rss_mb = getRSS_MB();
@@ -195,17 +239,13 @@ int main(int argc, char** argv) {
             for (const auto& [d, id] : results[q]) if (hset.count(id)) correct++;
         }
         r.recall_hnsw = (double)correct / (num_query * k) * 100;
-
-        auto& stats = hnsw.getCacheStats();
-        r.hit_rate = stats.total_accesses > 0 ?
-            (double)stats.cache_hits.load() / stats.total_accesses.load() * 100 : 0;
+        r.hit_rate = 0; // N/A for native
 
         printResult(r);
         all_results.push_back(r);
     }
+    if (hnsw_alg) { delete hnsw_alg; hnsw_alg = nullptr; }
     malloc_trim(0);
-
-    // ---- F2-single: c1024+GP, blocking search (original) ----
     std::cout << "\n[F2-single] c1024+GP, blocking search..." << std::endl;
     {
         auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
@@ -259,12 +299,20 @@ int main(int argc, char** argv) {
         printResult(r);
         all_results.push_back(r);
     }
+    // 释放 hnswlib index, 之后的 F2 测试不应该包含它的内存
+    delete hnsw_alg;
     malloc_trim(0);
 
 
     // ---- F2-batch: c1024+GP, batch non-blocking search ----
+    const char* skip_env = std::getenv("SKIP_CONFIGS");
+    std::string skip_configs = skip_env ? skip_env : "";
+    auto shouldSkip = [&](const std::string& name) {
+        return skip_configs.find(name) != std::string::npos;
+    };
     for (size_t bs : {4}) {
         if (bs > num_query) continue;
+        if (shouldSkip("batch")) continue;
         std::cout << "\n[F2-batch-" << bs << "] c1024+GP, batch non-blocking (bs=" << bs << ")..." << std::endl;
         {
             auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
@@ -325,14 +373,19 @@ int main(int argc, char** argv) {
     }
 
     // ---- F2-single-256MB: 同内存 (256MB) 对比, slots 按 block_size 自动计算 ----
-    size_t mem256_slots = (size_t)256 * 1024 * 1024 / block_size;  // 64KB->4096, 32KB->8192
-    std::cout << "\n[F2-single-256MB] c" << mem256_slots << "+GP, blocking (同内存 256MB)..." << std::endl;
+    // 缓存大小从环境变量读取, 默认 256MB
+    size_t cache_mb = []() {
+        const char* e = std::getenv("CACHE_MB");
+        return e ? std::atol(e) : 256;
+    }();
+    size_t mem_slots = (size_t)cache_mb * 1024 * 1024 / block_size;
+    std::cout << "\n[F2-single-" << cache_mb << "MB] c" << mem_slots << "+GP, blocking..." << std::endl;
     {
         auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
         auto policy = std::make_unique<LRUPolicy>();
         auto cache = std::make_unique<BlockCache>(
             blocks_path, std::move(layout), std::move(policy),
-            mem256_slots, dim, odirect_config);
+            mem_slots, dim, odirect_config);
         DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
         hnsw.setEf(ef);
         hnsw.enableGraphPrefetch(true);
@@ -354,7 +407,7 @@ int main(int argc, char** argv) {
         auto t1 = std::chrono::high_resolution_clock::now();
 
         BenchResult r;
-        r.name = "F2-single: c" + std::to_string(mem256_slots) + "+GP (256MB)";
+        r.name = "F2-single: c" + std::to_string(mem_slots) + "+GP (256MB)";
         r.lat = computeLatency(latencies);
         r.qps = num_query / std::chrono::duration<double>(t1 - t0).count();
         r.rss_mb = getRSS_MB();
@@ -379,14 +432,15 @@ int main(int argc, char** argv) {
 
     // ---- F2-beam: Cache-Aware Beam Search ----
     // 测试多个 beam width: B=2, 4, 8
+    if (!shouldSkip("beam"))
     for (int bw : {2, 4, 8}) {
-        std::cout << "\n[F2-beam-" << bw << "] c" << mem256_slots << "+GP, beam search (B=" << bw << ")..." << std::endl;
+        std::cout << "\n[F2-beam-" << bw << "] c" << mem_slots << "+GP, beam search (B=" << bw << ")..." << std::endl;
         {
             auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
             auto policy = std::make_unique<LRUPolicy>();
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
-                mem256_slots, dim, odirect_config);
+                mem_slots, dim, odirect_config);
             DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
             hnsw.setEf(ef);
             hnsw.enableGraphPrefetch(true);
@@ -415,7 +469,7 @@ int main(int argc, char** argv) {
             unsetenv("BEAM_WIDTH");
 
             BenchResult r;
-            r.name = "F2-beam-" + std::to_string(bw) + ": c" + std::to_string(mem256_slots) + "+GP (256MB)";
+            r.name = "F2-beam-" + std::to_string(bw) + ": c" + std::to_string(mem_slots) + "+GP (256MB)";
             r.lat = computeLatency(latencies);
             r.qps = num_query / std::chrono::duration<double>(t1 - t0).count();
             r.rss_mb = getRSS_MB();
@@ -441,15 +495,16 @@ int main(int argc, char** argv) {
 
     // ---- F2-event: Event-driven multi-query concurrency ----
     // 测试 event-driven batch search: batch=4, batch=8
+    if (!shouldSkip("event"))
     for (size_t bs : {4, 8}) {
         if (bs > num_query) continue;
-        std::cout << "\n[F2-event-" << bs << "] c" << mem256_slots << "+GP, event-driven (bs=" << bs << ")..." << std::endl;
+        std::cout << "\n[F2-event-" << bs << "] c" << mem_slots << "+GP, event-driven (bs=" << bs << ")..." << std::endl;
         {
             auto layout = std::make_unique<BfsLayoutProvider>(route_path, num_blocks);
             auto policy = std::make_unique<LRUPolicy>();
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
-                mem256_slots, dim, odirect_config);
+                mem_slots, dim, odirect_config);
             DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
             hnsw.setEf(ef);
             hnsw.enableGraphPrefetch(true);
@@ -489,7 +544,7 @@ int main(int argc, char** argv) {
             double total_s = std::chrono::duration<double>(t1 - t0).count();
 
             BenchResult r;
-            r.name = "F2-event-" + std::to_string(bs) + ": c" + std::to_string(mem256_slots) + "+GP (256MB)";
+            r.name = "F2-event-" + std::to_string(bs) + ": c" + std::to_string(mem_slots) + "+GP (256MB)";
             r.lat = computeLatency(latencies);
             r.qps = num_query / total_s;
             r.rss_mb = getRSS_MB();
@@ -518,9 +573,10 @@ int main(int argc, char** argv) {
 
     // ---- F2-concurrent: multi-threaded concurrent search ----
     // Tests 4 configs: concurrent-4-nb, concurrent-8-nb, concurrent-4, concurrent-8
+    if (!shouldSkip("concurrent"))
     for (auto& [nt, nb] : std::vector<std::pair<int,int>>{{4,1},{8,1},{4,0},{8,0}}) {
         std::string config_name = "F2-concurrent-" + std::to_string(nt) + (nb ? "-nb" : "");
-        std::cout << "\n[" << config_name << "] c" << mem256_slots << "+GP, " << nt
+        std::cout << "\n[" << config_name << "] c" << mem_slots << "+GP, " << nt
                   << " threads, " << (nb ? "non-blocking" : "blocking") << "..." << std::endl;
 
         // Set NONBLOCK env var
@@ -532,7 +588,7 @@ int main(int argc, char** argv) {
             auto policy = std::make_unique<LRUPolicy>();
             auto cache = std::make_unique<BlockCache>(
                 blocks_path, std::move(layout), std::move(policy),
-                mem256_slots, dim, odirect_config);
+                mem_slots, dim, odirect_config);
             DiskHNSW hnsw(graph_path, bfs_path, std::move(cache));
             hnsw.setEf(ef);
             hnsw.enableGraphPrefetch(true);
@@ -568,7 +624,7 @@ int main(int argc, char** argv) {
             double total_s = std::chrono::duration<double>(t1 - t0).count();
 
             BenchResult r;
-            r.name = config_name + ": c" + std::to_string(mem256_slots) + "+GP (256MB)";
+            r.name = config_name + ": c" + std::to_string(mem_slots) + "+GP (256MB)";
             r.lat = computeLatency(latencies);
             r.qps = num_query / total_s;
             r.rss_mb = getRSS_MB();
