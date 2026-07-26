@@ -163,6 +163,26 @@ public:
     // 返回 nullptr 表示节点不存在或加载失败
     const float* getNodeVector(uint32_t node_id);
 
+    // 只查 flat vec cache, 不触发任何 I/O (hybrid 精排用)
+    const float* getFlatVector(uint32_t node_id) {
+        if (flat_vec_num_slots_ > 0 && flat_vec_data_ && flat_vec_owners_) {
+            size_t slot = (size_t)node_id % flat_vec_num_slots_;
+            if (flat_vec_owners_[slot] == node_id) {
+                return &flat_vec_data_[slot * dim_];
+            }
+        }
+        return nullptr;
+    }
+
+    // 插入 flat vec cache (FINE 精排回填热向量)
+    void putFlatVector(uint32_t node_id, const float* vec) {
+        if (flat_vec_num_slots_ > 0 && flat_vec_data_ && flat_vec_owners_) {
+            size_t slot = (size_t)node_id % flat_vec_num_slots_;
+            flat_vec_owners_[slot] = node_id;
+            std::memcpy(&flat_vec_data_[slot * dim_], vec, dim_ * sizeof(float));
+        }
+    }
+
     // 获取节点的邻居列表
     // out_count 输出邻居数量
     // 返回 nullptr 表示节点不存在或加载失败

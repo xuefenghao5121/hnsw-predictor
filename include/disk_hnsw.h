@@ -17,6 +17,7 @@
 #include "layout_provider.h"
 #include "replacement_policy.h"
 #include "graph_prefetcher.h"
+#include "io_uring_wrapper.h"
 
 #include <vector>
 #include <string>
@@ -242,6 +243,16 @@ private:
 
     // ---- PQ 数据 ----
     bool pq_enabled_ = false;
+    int spec_pf_counter_ = 0;  // 投机预取节流计数器 (searchLayer0 PQ 分支)
+
+    // ---- 细粒度精排读 (FINE_RERANK=1): 候选向量 4KB 页粒度读, I/O 64KB→4KB (16x↓) ----
+    std::vector<uint16_t> node_slot_table_;     // node -> block 内 slot (2MB @1M)
+    std::vector<uint32_t> block_data_offset_;   // block -> 向量区 data_offset
+    std::unique_ptr<IoUring> vec_ring_;         // 4KB buffer pool ring (独立于 block 预取 ring)
+    int vec_blocks_fd_ = -1;
+    uint32_t vec_block_size_ = 0;
+    bool fine_rerank_ok_ = false;
+    bool buildFineRerank(const std::string& blocks_path, uint32_t num_nodes);
     PQParams pq_params_;
     std::vector<float> pq_codebook_;    // [M * ksub * dsub] floats
     std::vector<uint8_t> pq_codes_;    // [N * M] bytes, indexed by new_id

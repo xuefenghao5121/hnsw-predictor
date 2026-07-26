@@ -239,10 +239,13 @@ void BlockCache::initFlatCache(size_t cache_bytes) {
     if (cache_bytes == 0 || dim_ == 0) return;
 
     // ---- Flat Vector Cache ----
-    // 关键：保持小到能装入 L3 cache (通常 8-32MB)
-    // 大数组会导致随机访问时 L3 miss，反而变慢
-    // 限制最大 4MB (约 10K slots for dim=96)
-    size_t vec_max_bytes = 4 * 1024 * 1024;  // 4MB
+    // 热向量 cache: FLAT_VEC_MB 环境变量可调 (默认 4MB, L3 友好)
+    // FINE_RERANK 模式建议 64-128MB (覆盖 13-26% 节点, hybrid 粗筛用)
+    size_t vec_max_bytes = 4 * 1024 * 1024;  // 4MB 默认
+    if (const char* env = std::getenv("FLAT_VEC_MB")) {
+        int mb = std::atoi(env);
+        if (mb > 0) vec_max_bytes = (size_t)mb * 1024 * 1024;
+    }
     size_t vec_budget = std::min(cache_bytes, vec_max_bytes);
     size_t vec_entry_size = dim_ * sizeof(float);
     size_t vec_owner_size = sizeof(uint32_t);
