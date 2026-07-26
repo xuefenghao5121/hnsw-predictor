@@ -1572,6 +1572,11 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
 
         if (kFineRerank && fine_rerank_ok_) {
             // ---- 4KB 页粒度精排: cache hit 取向量, miss 按 4KB 页批量 io_uring 读 ----
+            static const bool kProfFine = std::getenv("PROFILE_FINE") && std::atoi(std::getenv("PROFILE_FINE")) != 0;
+            static double pf_collect = 0, pf_submit = 0, pf_first = 0, pf_iorest = 0, pf_compute = 0;
+            static long pf_pages = 0, pf_cached = 0, pf_iters = 0, pf_n = 0;
+            auto tf0 = std::chrono::high_resolution_clock::now();
+
             std::priority_queue<std::pair<float, uint32_t>> refined;
             auto consider = [&](uint32_t nid, const float* vec) {
                 float d = l2Distance(query, vec);
@@ -1601,6 +1606,7 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
             }
 
             // 提交所有页读
+            auto tf1 = std::chrono::high_resolution_clock::now();
             std::unordered_map<uint32_t, int> page_buf;
             page_buf.reserve(pages_needed.size());
             for (uint32_t page : pages_needed) {
@@ -1610,13 +1616,23 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                 page_buf[page] = buf;
             }
             vec_ring_->submit();
+            auto tf2 = std::chrono::high_resolution_clock::now();
 
             // 等全部完成
+            bool first_cqe_done = false;
+            double first_cqe_us = 0;
             size_t done = 0;
             const size_t total = page_buf.size();
             std::vector<IoUring::CqeResult> results;
+            long wait_iters = 0;
             while (done < total) {
                 vec_ring_->waitCompletion();
+                if (!first_cqe_done) {
+                    first_cqe_us = std::chrono::duration<double, std::micro>(
+                        std::chrono::high_resolution_clock::now() - tf2).count();
+                    first_cqe_done = true;
+                }
+                wait_iters++;
                 results.clear();
                 vec_ring_->reapCompletions(results);
                 done += results.size();
@@ -1624,6 +1640,7 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                     if (cqe.res != 4096) page_buf[(uint32_t)cqe.user_data] = -1;  // 标记失败
                 }
             }
+            auto tf3 = std::chrono::high_resolution_clock::now();
 
             // 统一算距离 (跨页拼两页)
             char tmp_vec[512];
@@ -1650,6 +1667,26 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
             // 释放 buffer
             for (auto& [page, buf] : page_buf) {
                 if (buf >= 0) vec_ring_->freeBuffer(buf);
+            }
+
+            if (kProfFine) {
+                auto tf4 = std::chrono::high_resolution_clock::now();
+                using us = std::chrono::duration<double, std::micro>;
+                pf_collect += us(tf1 - tf0).count();
+                pf_submit += us(tf2 - tf1).count();
+                pf_first += first_cqe_us;
+                pf_iorest += us(tf3 - tf2).count() - first_cqe_us;
+                pf_compute += us(tf4 - tf3).count();
+                pf_pages += page_buf.size();
+                pf_cached += (cand_ids.size() - io_cands.size());
+                pf_iters += wait_iters;
+                pf_n++;
+                if (pf_n % 200 == 0) {
+                    fprintf(stderr,
+                        "[PROFILE_FINE] n=%ld collect=%.0f submit=%.0f io_1st=%.0f io_rest=%.0f compute=%.0f | pages=%.1f cached=%.1f iters=%.1f\n",
+                        pf_n, pf_collect/pf_n, pf_submit/pf_n, pf_first/pf_n, pf_iorest/pf_n, pf_compute/pf_n,
+                        (double)pf_pages/pf_n, (double)pf_cached/pf_n, (double)pf_iters/pf_n);
+                }
             }
 
             while (!refined.empty()) {
@@ -1815,7 +1852,14 @@ DiskHNSW::batchSearch(const std::vector<float>& queries, size_t k, size_t batch_
 // ============================================================
 bool DiskHNSW::buildFineRerank(const std::string& blocks_path, uint32_t num_nodes) {
     // 懒构建: node→slot 表 + block→data_offset 表 + 4KB io_uring
-    int fd = open(blocks_path.c_str(), O_RDONLY | O_DIRECT);
+    // FINE_BUFFERED=1 时用 buffered I/O 吃 page cache (热区页零 I/O)
+    static const bool kFineBuffered = std::getenv("FINE_BUFFERED") && std::atoi(std::getenv("FINE_BUFFERED")) != 0;
+    int fd = -1;
+    if (kFineBuffered) {
+        fd = open(blocks_path.c_str(), O_RDONLY);
+        std::cerr << "[FineRerank] buffered mode (page cache)" << std::endl;
+    }
+    if (fd < 0) fd = open(blocks_path.c_str(), O_RDONLY | O_DIRECT);
     if (fd < 0) fd = open(blocks_path.c_str(), O_RDONLY);  // fallback buffered
     if (fd < 0) {
         std::cerr << "[FineRerank] open failed: " << blocks_path << std::endl;
