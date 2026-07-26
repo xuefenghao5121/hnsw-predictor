@@ -1680,24 +1680,45 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                 if (cross) pages_needed.insert(page0 + 1);
             }
 
-            // 提交所有页读
+            // 提交页读: FINE_MERGE=1 时相邻页合并为一次 8KB 读
+            static const bool kFineMerge = std::getenv("FINE_MERGE") && std::atoi(std::getenv("FINE_MERGE")) != 0;
             auto tf1 = std::chrono::high_resolution_clock::now();
+            // page_buf[page] = buf_idx*2 + half (half=1 表示该页在合并读的后 4KB)
             std::unordered_map<uint32_t, int> page_buf;
             page_buf.reserve(pages_needed.size());
-            for (uint32_t page : pages_needed) {
+            size_t submitted_reqs = 0;  // 实际请求数 (合并后 < page_buf.size())
+            auto pit = pages_needed.begin();
+            while (pit != pages_needed.end()) {
+                uint32_t p0 = *pit;
+                size_t len = 4096;
+                auto nx = std::next(pit);
+                if (kFineMerge && nx != pages_needed.end() && *nx == p0 + 1) {
+                    len = 8192;
+                }
                 int buf = vec_ring_->allocBuffer();
-                if (buf < 0) continue;  // 兜底: 后面统一同步 pread (不应发生, pool 256>116)
-                vec_ring_->submitRead(vec_blocks_fd_, (off_t)page << 12, 4096, buf, page);
-                page_buf[page] = buf;
+                if (buf < 0) { ++pit; continue; }  // 兜底: 后面统一同步 pread (不应发生)
+                vec_ring_->submitReadNF(vec_blocks_fd_, (off_t)p0 << 12, len, buf,
+                                        (uint64_t)p0 | ((len == 8192) ? (1ull << 32) : 0));
+                page_buf[p0] = buf * 2;
+                if (len == 8192) {
+                    page_buf[p0 + 1] = buf * 2 + 1;
+                    pit = nx;
+                }
+                submitted_reqs++;
+                ++pit;
             }
+            vec_ring_->flushSqe();
+            auto tf1b = std::chrono::high_resolution_clock::now();
             vec_ring_->submit();
             auto tf2 = std::chrono::high_resolution_clock::now();
+            static double pf_syscall = 0;
+            pf_syscall += std::chrono::duration<double, std::micro>(tf2 - tf1b).count();
 
-            // 等全部完成
+            // 等全部完成 (total = 请求数, 不是 page_buf 条目数)
             bool first_cqe_done = false;
             double first_cqe_us = 0;
             size_t done = 0;
-            const size_t total = page_buf.size();
+            const size_t total = submitted_reqs;
             std::vector<IoUring::CqeResult> results;
             long wait_iters = 0;
             while (done < total) {
@@ -1712,24 +1733,34 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                 vec_ring_->reapCompletions(results);
                 done += results.size();
                 for (const auto& cqe : results) {
-                    if (cqe.res != 4096) page_buf[(uint32_t)cqe.user_data] = -1;  // 标记失败
+                    uint32_t p0 = (uint32_t)(cqe.user_data & 0xFFFFFFFFu);
+                    bool is8k = (cqe.user_data >> 32) != 0;
+                    int expect = is8k ? 8192 : 4096;
+                    if (cqe.res != expect) {
+                        page_buf[p0] = -1;  // 标记失败
+                        if (is8k) page_buf[p0 + 1] = -1;
+                    }
                 }
             }
             auto tf3 = std::chrono::high_resolution_clock::now();
 
-            // 统一算距离 (跨页拼两页)
+            // 统一算距离 (跨页拼两页; page_buf 编码 buf*2+half)
             char tmp_vec[512];
+            auto getPagePtr = [&](uint32_t page) -> const char* {
+                auto it = page_buf.find(page);
+                if (it == page_buf.end() || it->second < 0) return nullptr;
+                int code = it->second;
+                return (const char*)vec_ring_->getBuffer(code >> 1) + (code & 1) * 4096;
+            };
             for (const auto& c : io_cands) {
-                auto it0 = page_buf.find(c.page0);
-                if (it0 == page_buf.end() || it0->second < 0) continue;
-                const char* p0 = (const char*)vec_ring_->getBuffer(it0->second);
+                const char* p0 = getPagePtr(c.page0);
+                if (!p0) continue;
                 const float* vec;
                 if (!c.cross) {
                     vec = reinterpret_cast<const float*>(p0 + c.oip);
                 } else {
-                    auto it1 = page_buf.find(c.page0 + 1);
-                    if (it1 == page_buf.end() || it1->second < 0) continue;
-                    const char* p1 = (const char*)vec_ring_->getBuffer(it1->second);
+                    const char* p1 = getPagePtr(c.page0 + 1);
+                    if (!p1) continue;
                     size_t first = 4096 - c.oip;
                     std::memcpy(tmp_vec, p0 + c.oip, first);
                     std::memcpy(tmp_vec + first, p1, dim_ * sizeof(float) - first);
@@ -1739,9 +1770,18 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                 cache_->putFlatVector(c.nid, vec);  // 回填热向量 cache, Phase A hybrid 用
             }
 
-            // 释放 buffer
-            for (auto& [page, buf] : page_buf) {
-                if (buf >= 0) vec_ring_->freeBuffer(buf);
+            // 释放 buffer (合并读两个页条目指向同一 buf, 去重)
+            {
+                int last_buf = -1;
+                std::vector<int> bufs;
+                bufs.reserve(page_buf.size());
+                for (auto& [page, code] : page_buf) {
+                    if (code >= 0) bufs.push_back(code >> 1);
+                }
+                std::sort(bufs.begin(), bufs.end());
+                for (int b : bufs) {
+                    if (b != last_buf) { vec_ring_->freeBuffer(b); last_buf = b; }
+                }
             }
 
             if (kProfFine) {
@@ -1758,8 +1798,8 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                 pf_n++;
                 if (pf_n % 200 == 0) {
                     fprintf(stderr,
-                        "[PROFILE_FINE] n=%ld collect=%.0f submit=%.0f io_1st=%.0f io_rest=%.0f compute=%.0f | pages=%.1f cached=%.1f iters=%.1f\n",
-                        pf_n, pf_collect/pf_n, pf_submit/pf_n, pf_first/pf_n, pf_iorest/pf_n, pf_compute/pf_n,
+                        "[PROFILE_FINE] n=%ld collect=%.0f loop+syscall=%.0f+%.0f io_1st=%.0f io_rest=%.0f compute=%.0f | pages=%.1f cached=%.1f iters=%.1f\n",
+                        pf_n, pf_collect/pf_n, (pf_submit-pf_syscall)/pf_n, pf_syscall/pf_n, pf_first/pf_n, pf_iorest/pf_n, pf_compute/pf_n,
                         (double)pf_pages/pf_n, (double)pf_cached/pf_n, (double)pf_iters/pf_n);
                 }
             }
@@ -1975,7 +2015,7 @@ bool DiskHNSW::buildFineRerank(const std::string& blocks_path, uint32_t num_node
 
     try {
         vec_ring_ = std::make_unique<IoUring>(256);
-        vec_ring_->setBufferSize(4096);
+        vec_ring_->setBufferSize(8192);  // 8KB slots: 相邻页可合并为一次 8KB 读
     } catch (const std::exception& e) {
         std::cerr << "[FineRerank] io_uring init failed: " << e.what() << std::endl;
         close(fd);

@@ -224,6 +224,31 @@ public:
         return 0;
     }
 
+    // Batch submit: fill SQE without per-SQE fence; flushSqe() does ONE
+    // memory barrier + tail bump for the whole batch (standard io_uring usage).
+    int submitReadNF(int fd, off_t offset, size_t nbytes, int buf_idx, uint64_t user_data) {
+        unsigned tail = *sq_tail_ + batch_pending_;
+        unsigned idx = tail & sq_mask_;
+        struct io_uring_sqe* sqe = &sqes_[idx];
+        memset(sqe, 0, sizeof(*sqe));
+        sqe->opcode = IORING_OP_READ;
+        sqe->fd = fd;
+        sqe->addr = (unsigned long long)aligned_buffers_[buf_idx];
+        sqe->len = nbytes;
+        sqe->off = offset;
+        sqe->user_data = user_data;
+        sq_array_[idx] = idx;
+        batch_pending_++;
+        inflight_++;
+        return 0;
+    }
+    void flushSqe() {
+        if (batch_pending_ == 0) return;
+        __sync_synchronize();
+        *sq_tail_ += batch_pending_;
+        batch_pending_ = 0;
+    }
+
     // Submit all pending SQEs to the kernel
     // Returns number of SQEs submitted
     int submit() {
@@ -334,4 +359,5 @@ private:
 
     // In-flight counter
     unsigned inflight_ = 0;
+    unsigned batch_pending_ = 0;  // SQEs filled but tail not bumped yet
 };
