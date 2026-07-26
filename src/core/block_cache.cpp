@@ -392,7 +392,40 @@ CachedBlock BlockCache::loadBlockFromDisk(uint32_t block_id) {
 void BlockCache::parseBlock(CachedBlock& block) {
     const uint8_t* base = block.raw_data.data();
 
-    // 读取 BlockHeader
+    // 检测 vec-only 格式: 第一个 uint32 是 block_id, 第二个是 node_count
+    // vec-only header = VecOnlyHeader(16B): block_id + node_count + data_offset + flags
+    // 检查 flags 字段 (offset 12, uint32)
+    uint32_t veconly_flags;
+    std::memcpy(&veconly_flags, base + 12, sizeof(uint32_t));
+    bool is_veconly = (veconly_flags & FLAG_VEC_ONLY) != 0;
+
+    if (is_veconly) {
+        // Vec-only block: [VecOnlyHeader(16B)] [node_ids(4*cnt)] [vectors(dim*4*cnt)]
+        uint32_t node_count, data_offset;
+        std::memcpy(&node_count, base + 4, sizeof(uint32_t));
+        std::memcpy(&data_offset, base + 8, sizeof(uint32_t));
+        block.node_count = node_count;
+
+        // Read node_ids to get first_node_id
+        const uint32_t* node_ids = reinterpret_cast<const uint32_t*>(base + 16);
+        if (node_count > 0) {
+            block.first_node_id = node_ids[0];
+        }
+
+        // Vectors start at data_offset
+        const float* vectors = reinterpret_cast<const float*>(base + data_offset);
+
+        block.nodes.resize(node_count);
+        for (uint32_t i = 0; i < node_count; i++) {
+            block.nodes[i].node_id = node_ids[i];
+            block.nodes[i].vector = vectors + (size_t)i * dim_;
+            block.nodes[i].neighbor_count = 0;
+            block.nodes[i].neighbors = nullptr;  // 邻居从 CSR 内存读取
+        }
+        return;
+    }
+
+    // 标准 BlockHeader 格式 (vec + adj)
     BlockHeader bh;
     std::memcpy(&bh, base, sizeof(BlockHeader));
 

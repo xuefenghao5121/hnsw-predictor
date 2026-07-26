@@ -398,9 +398,16 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         // 更新 block 热度
         if (heat_evaluator_) heat_evaluator_->onBlockAccess(curr_block_id);
         if (!candidateBlock) {
-            // 块不在缓存中（可能被淘汰），回退到 getNodeNeighbors
+            // 块不在缓存中（可能被淘汰）
+            // 优先用 CSR 内存邻接表, 其次回退到 getNodeNeighbors
             uint32_t neighborCount = 0;
-            const uint32_t* neighbors = cache_->getNodeNeighbors(candidateId, neighborCount);
+            const uint32_t* neighbors = nullptr;
+            if (has_inmem_adjacency_) {
+                neighbors = getInMemNeighbors(candidateId, neighborCount);
+            }
+            if (!neighbors) {
+                neighbors = cache_->getNodeNeighbors(candidateId, neighborCount);
+            }
             if (!neighbors || neighborCount == 0) continue;
             std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
@@ -478,9 +485,15 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
             continue;
         }
 
-        // ---- 快速路径：从 CachedBlock 直接获取邻居 ----
+        // ---- 快速路径：从 CSR 内存邻接表或 CachedBlock 获取邻居 ----
         uint32_t neighborCount = 0;
-        const uint32_t* neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
+        const uint32_t* neighbors = nullptr;
+        if (has_inmem_adjacency_) {
+            neighbors = getInMemNeighbors(candidateId, neighborCount);
+        }
+        if (!neighbors) {
+            neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
+        }
         if (!neighbors || neighborCount == 0) continue;
 
         // 复制邻居ID到本地缓冲区（因为后续操作可能导致 block 被淘汰）
@@ -734,9 +747,15 @@ DiskHNSW::searchLayer0NonBlocking(uint32_t entry_new_id, const float* query, siz
                 // 继续处理 (和阻塞版一样)
             }
 
-            // 快速路径: 从 CachedBlock 获取邻居
+            // 快速路径: 从 CSR 内存或 CachedBlock 获取邻居
             uint32_t neighborCount = 0;
-            const uint32_t* neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
+            const uint32_t* neighbors = nullptr;
+            if (has_inmem_adjacency_) {
+                neighbors = getInMemNeighbors(candidateId, neighborCount);
+            }
+            if (!neighbors) {
+                neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
+            }
             if (!neighbors || neighborCount == 0) continue;
             std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
@@ -1002,9 +1021,15 @@ void DiskHNSW::expandBeamCandidate(
         return;
     }
 
-    // 快速路径: 从 CachedBlock 获取邻居
+    // 快速路径: 从 CSR 内存或 CachedBlock 获取邻居
     uint32_t neighborCount = 0;
-    const uint32_t* neighbors = block->getNeighbors(nodeId, neighborCount);
+    const uint32_t* neighbors = nullptr;
+    if (has_inmem_adjacency_) {
+        neighbors = getInMemNeighbors(nodeId, neighborCount);
+    }
+    if (!neighbors) {
+        neighbors = block->getNeighbors(nodeId, neighborCount);
+    }
     if (!neighbors || neighborCount == 0) return;
     std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
@@ -1322,7 +1347,13 @@ DiskHNSW::searchLayer0BatchIO(uint32_t entry_new_id, const float* query, size_t 
             if (heat_evaluator_) heat_evaluator_->onBlockAccess(bc.blockId);
 
             uint32_t neighborCount = 0;
-            const uint32_t* neighbors = blk->getNeighbors(bc.nodeId, neighborCount);
+            const uint32_t* neighbors = nullptr;
+            if (has_inmem_adjacency_) {
+                neighbors = getInMemNeighbors(bc.nodeId, neighborCount);
+            }
+            if (!neighbors) {
+                neighbors = blk->getNeighbors(bc.nodeId, neighborCount);
+            }
             if (!neighbors || neighborCount == 0) continue;
 
             for (uint32_t j = 0; j < neighborCount; j++) {

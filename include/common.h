@@ -76,6 +76,7 @@ static_assert(sizeof(BlockHeader) == 24, "BlockHeader size mismatch");
 
 // BlockHeader flags
 static constexpr uint8_t FLAG_NEIGHBOR_DELTA_VARINT = 0x01;
+static constexpr uint32_t FLAG_VEC_ONLY = 0x02;  // vec-only block (no adjacency)
 
 // ============================================================
 // route_table.bin 格式
