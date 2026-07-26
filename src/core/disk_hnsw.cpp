@@ -18,6 +18,7 @@
 #include <thread>
 #include <atomic>
 #include <unordered_map>
+#include <immintrin.h>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -231,13 +232,85 @@ void DiskHNSW::loadPQCodes(const std::string& pq_path) {
 // PQ ADC (Asymmetric Distance Computation)
 // ============================================================
 
+// ============================================================
+// PQ 距离表预计算 (SIMD): table[m][k] = |query[m] - centroid[m][k]|^2
+// 之后 pqDistance 退化为 M 次查表加法
+// ============================================================
+
+void DiskHNSW::buildPqDistTable(const float* query) {
+    const uint32_t M = pq_params_.M;
+    const uint32_t ksub = pq_params_.ksub;
+    const uint32_t dsub = pq_params_.dsub;
+    pq_dist_table_.resize((size_t)M * ksub);
+    const float* cb = pq_codebook_.data();
+
+    if (dsub == 4) {
+        // AVX2: 一次处理 2 个 centroid (8 floats)
+        for (uint32_t m = 0; m < M; m++) {
+            const float* q_sub = query + (size_t)m * 4;
+            const float* cb_m = cb + (size_t)m * ksub * 4;
+            float* t = &pq_dist_table_[(size_t)m * ksub];
+            __m128 qv = _mm_loadu_ps(q_sub);
+            __m256 q2 = _mm256_insertf128_ps(_mm256_castps128_ps256(qv), qv, 1);
+            uint32_t k = 0;
+            for (; k + 2 <= ksub; k += 2) {
+                __m256 c2 = _mm256_loadu_ps(cb_m + (size_t)k * 4);
+                __m256 d = _mm256_sub_ps(q2, c2);
+                __m256 sq = _mm256_mul_ps(d, d);
+                __m128 lo = _mm256_castps256_ps128(sq);
+                __m128 hi = _mm256_extractf128_ps(sq, 1);
+                __m128 h = _mm_hadd_ps(lo, hi);   // [l01, l23, h01, h23]
+                h = _mm_hadd_ps(h, h);            // [lsum, hsum, ...]
+                t[k]   = _mm_cvtss_f32(h);
+                t[k+1] = _mm_cvtss_f32(_mm_shuffle_ps(h, h, 0x55));
+            }
+            for (; k < ksub; k++) {
+                __m128 c = _mm_loadu_ps(cb_m + (size_t)k * 4);
+                __m128 d = _mm_sub_ps(qv, c);
+                __m128 sq = _mm_mul_ps(d, d);
+                __m128 h = _mm_hadd_ps(sq, sq);
+                h = _mm_hadd_ps(h, h);
+                t[k] = _mm_cvtss_f32(h);
+            }
+        }
+    } else {
+        for (uint32_t m = 0; m < M; m++) {
+            const float* q_sub = query + (size_t)m * dsub;
+            const float* cb_m = cb + (size_t)m * ksub * dsub;
+            float* t = &pq_dist_table_[(size_t)m * ksub];
+            for (uint32_t k = 0; k < ksub; k++) {
+                const float* c = cb_m + (size_t)k * dsub;
+                float s = 0.0f;
+                for (uint32_t j = 0; j < dsub; j++) {
+                    float d = q_sub[j] - c[j];
+                    s += d * d;
+                }
+                t[k] = s;
+            }
+        }
+    }
+}
+
 float DiskHNSW::pqDistance(const float* query, uint32_t node_id_new) const {
-    // ADC: 用 query (原始向量) 和 PQ code (量化向量) 计算近似 L2 距离
-    // 对每个子量化器 m:
-    //   centroid = codebook[m][code[m]]  // dsub floats
-    //   diff = query[m*dsub : (m+1)*dsub] - centroid
-    //   dist += |diff|^2
+    // 查表快路径: 距离表已预计算 (buildPqDistTable)
     const uint8_t* code = &pq_codes_[(size_t)node_id_new * pq_params_.M];
+    if (!pq_dist_table_.empty()) {
+        const uint32_t M = pq_params_.M;
+        const uint32_t ksub = pq_params_.ksub;
+        const float* t = pq_dist_table_.data();
+        float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        uint32_t m = 0;
+        for (; m + 4 <= M; m += 4) {
+            s0 += t[(size_t)(m + 0) * ksub + code[m + 0]];
+            s1 += t[(size_t)(m + 1) * ksub + code[m + 1]];
+            s2 += t[(size_t)(m + 2) * ksub + code[m + 2]];
+            s3 += t[(size_t)(m + 3) * ksub + code[m + 3]];
+        }
+        for (; m < M; m++) s0 += t[(size_t)m * ksub + code[m]];
+        return (s0 + s1) + (s2 + s3);
+    }
+
+    // ADC fallback: 直接计算
     const float* cb = pq_codebook_.data();
     float dist = 0.0f;
 
@@ -1546,6 +1619,8 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
         auto tp0 = std::chrono::high_resolution_clock::now();
 
         // === Phase A: PQ 粗筛 (ADC 距离, 无向量 I/O) ===
+        // 预计算距离表: pqDistance 退化为查表 (SIMD 化)
+        buildPqDistTable(query);
         size_t ef_coarse = std::max(ef, (size_t)kRefineEf);
         auto coarse = searchLayer0(entryNewId, query, ef_coarse, visited);
         auto tpA = std::chrono::high_resolution_clock::now();

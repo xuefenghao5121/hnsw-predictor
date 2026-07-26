@@ -205,6 +205,8 @@ public:
     bool isPQEnabled() const { return pq_enabled_; }
     const PQParams& getPQParams() const { return pq_params_; }
     float pqDistance(const float* query, uint32_t node_id_new) const;
+    // 每 query 预计算 PQ 距离表 [M * ksub], pqDistance 退化为查表 (SIMD 化)
+    void buildPqDistTable(const float* query);
 
 private:
     // ---- 图数据（常驻内存，old_id空间）----
@@ -254,6 +256,7 @@ private:
     bool fine_rerank_ok_ = false;
     bool buildFineRerank(const std::string& blocks_path, uint32_t num_nodes);
     PQParams pq_params_;
+    std::vector<float> pq_dist_table_;  // [M * ksub] 每 query 预计算的距离表
     std::vector<float> pq_codebook_;    // [M * ksub * dsub] floats
     std::vector<uint8_t> pq_codes_;    // [N * M] bytes, indexed by new_id
 
