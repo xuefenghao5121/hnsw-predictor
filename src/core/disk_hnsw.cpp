@@ -34,7 +34,7 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
 {
     // ---- 1. 加载图结构 (slim 模式: 只加载上层节点数据) ----
     std::cout << "[DiskHNSW] Loading graph structure (slim) from " << graph_path << "..." << std::endl;
-    graph_ = load_graph_structure_slim(graph_path);
+    graph_ = load_graph_structure_slim_adj(graph_path);
     dim_ = graph_.dim;
     dim_param_ = dim_;
 
@@ -66,6 +66,9 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
     bfs_in.close();
 
     std::cout << "[DiskHNSW] BFS mapping loaded: " << old_to_new_.size() << " entries" << std::endl;
+    
+    // ---- 构建 BFS-remapped CSR 邻接表 (常驻内存, 用于 multi-hop 预取) ----
+    buildInMemoryAdjacency();
 
     // ---- 3. 初始化BlockCache ----
     std::cout << "[DiskHNSW] Initializing BlockCache..." << std::endl;
@@ -87,7 +90,7 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
 {
     // ---- 1. 加载图结构 (slim 模式: 只加载上层节点数据) ----
     std::cout << "[DiskHNSW] Loading graph structure (slim) from " << graph_path << "..." << std::endl;
-    graph_ = load_graph_structure_slim(graph_path);
+    graph_ = load_graph_structure_slim_adj(graph_path);
     dim_ = graph_.dim;
     dim_param_ = dim_;
 
@@ -119,6 +122,9 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
     bfs_in.close();
 
     std::cout << "[DiskHNSW] BFS mapping loaded: " << old_to_new_.size() << " entries" << std::endl;
+    
+    // ---- 构建 BFS-remapped CSR 邻接表 (常驻内存, 用于 multi-hop 预取) ----
+    buildInMemoryAdjacency();
     std::cout << "[DiskHNSW] BlockCache (pluggable) initialized" << std::endl;
     cache_slots_ = cache_->getCacheSlots();
 }
@@ -1757,23 +1763,67 @@ void DiskHNSW::stepQueryState(QueryState& qs) {
 
     if (heat_evaluator_) heat_evaluator_->onBlockAccess(curr_block_id);
 
+    // 优先使用内存 CSR 邻接表 (无需从 block 解码)
     uint32_t neighborCount = 0;
-    const uint32_t* neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
+    const uint32_t* neighbors = nullptr;
+    if (has_inmem_adjacency_) {
+        neighbors = getInMemNeighbors(candidateId, neighborCount);
+    }
+    if (!neighbors) {
+        neighbors = candidateBlock->getNeighbors(candidateId, neighborCount);
+    }
     if (!neighbors || neighborCount == 0) return;
     std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
-    // 提交 1-hop 预取
+    // 提交 1-hop 预取 + multi-hop 预取 (使用内存 CSR 邻接表)
+    // MULTIHOP_DEPTH 环境变量控制: 0=关闭, 1=仅1-hop, 2=1+2-hop (默认 2)
+    static const int multihop_depth = [](){
+        const char* e = std::getenv("MULTIHOP_DEPTH");
+        return e ? std::atoi(e) : 2;
+    }();
     if (graph_prefetch_enabled_ && graph_prefetcher_) {
-        std::vector<uint32_t> prefetch_blocks;
+        std::vector<uint32_t> prefetch_blocks;  // 1-hop
+        std::vector<uint32_t> multi_hop_blocks; // 2+ hop
+        
         for (uint32_t nid : local_neighbors) {
             uint32_t nb = route_table_ ? (*route_table_)[nid] : cache_->getBlockId(nid);
-            if (nb != curr_block_id) prefetch_blocks.push_back(nb);
+            if (nb != curr_block_id) {
+                prefetch_blocks.push_back(nb);
+                
+                // Multi-hop: 如果该邻居的 block 不在缓存 (cache miss),
+                // 用内存 CSR 邻接表读取它的邻居, 预取更远的 block
+                if (multihop_depth >= 2 && has_inmem_adjacency_ && !cache_->peekCachedBlockById(nb)) {
+                    uint32_t nn_count = 0;
+                    const uint32_t* nn = getInMemNeighbors(nid, nn_count);
+                    if (nn) {
+                        // 只预取前 8 个 2-hop 邻居的 block (避免 io_uring 淹没)
+                        int hop2_count = 0;
+                        for (uint32_t k2 = 0; k2 < nn_count && hop2_count < 8; k2++) {
+                            uint32_t nb2 = route_table_ ? (*route_table_)[nn[k2]]
+                                                        : cache_->getBlockId(nn[k2]);
+                            if (nb2 != curr_block_id && nb2 != nb) {
+                                multi_hop_blocks.push_back(nb2);
+                                hop2_count++;
+                            }
+                        }
+                    }
+                }
+            }
         }
+        
+        // 1-hop 预取
         std::sort(prefetch_blocks.begin(), prefetch_blocks.end());
         prefetch_blocks.erase(std::unique(prefetch_blocks.begin(), prefetch_blocks.end()),
                               prefetch_blocks.end());
         if (!prefetch_blocks.empty())
             graph_prefetcher_->submitPrefetch(prefetch_blocks, true);
+        
+        // Multi-hop 预取
+        std::sort(multi_hop_blocks.begin(), multi_hop_blocks.end());
+        multi_hop_blocks.erase(std::unique(multi_hop_blocks.begin(), multi_hop_blocks.end()),
+                               multi_hop_blocks.end());
+        if (!multi_hop_blocks.empty())
+            graph_prefetcher_->submitPrefetch(multi_hop_blocks, true);
     }
 
     // 处理邻居: in-cache 直接计算距离, out-of-cache 加入 deferred
@@ -1814,6 +1864,93 @@ void DiskHNSW::stepQueryState(QueryState& qs) {
     }
 }
 
+// 事件驱动: 连续处理候选直到 I/O miss 或完成
+// 返回处理的步数, 0 表示已完成或第一步就 miss
+int DiskHNSW::runQueryUntilMiss(QueryState& qs, int max_steps) {
+    int steps = 0;
+    while (steps < max_steps && !qs.done) {
+        // 如果在等待 block, 不能继续
+        if (qs.waitingBlockId) return steps;
+        // 如果 deferred 非空且 candidate_set 为空, 需要等 I/O
+        if (qs.candidate_set.empty() && !qs.deferred.empty()) {
+            // 尝试处理 deferred
+            stepQueryState(qs);
+            steps++;
+            if (qs.waitingBlockId) return steps;
+            continue;
+        }
+        if (qs.candidate_set.empty() && qs.deferred.empty()) {
+            qs.done = true;
+            return steps;
+        }
+        stepQueryState(qs);
+        steps++;
+        // 检查是否开始等待
+        if (qs.waitingBlockId) return steps;
+    }
+    return steps;
+}
+
+// 构建 BFS-remapped CSR 邻接表
+void DiskHNSW::buildInMemoryAdjacency() {
+    if (graph_.adjacency0.empty()) {
+        std::cerr << "[DiskHNSW] Warning: graph_.adjacency0 is empty, cannot build CSR" << std::endl;
+        return;
+    }
+
+    uint32_t N = graph_.num_nodes;
+    adj_csr_offsets_.resize(N + 1, 0);
+
+    // 第一步: 计算每个节点的邻居数 (在 new_id 空间)
+    // graph_.adjacency0 使用 old_id, 需要映射
+    for (uint32_t old_id = 0; old_id < N; old_id++) {
+        uint32_t new_id = old_to_new_[old_id];
+        adj_csr_offsets_[new_id + 1] = graph_.adjacency0[old_id].size();
+    }
+
+    // 前缀和
+    for (uint32_t i = 0; i < N; i++) {
+        adj_csr_offsets_[i + 1] += adj_csr_offsets_[i];
+    }
+
+    size_t total_edges = adj_csr_offsets_[N];
+    adj_csr_neighbors_.resize(total_edges);
+
+    // 第二步: 填充邻居 (映射到 new_id)
+    // 临时 offset 指针
+    std::vector<uint32_t> write_pos(adj_csr_offsets_.begin(), adj_csr_offsets_.end());
+
+    for (uint32_t old_id = 0; old_id < N; old_id++) {
+        uint32_t new_id = old_to_new_[old_id];
+        for (uint32_t old_neighbor : graph_.adjacency0[old_id]) {
+            uint32_t new_neighbor = old_to_new_[old_neighbor];
+            adj_csr_neighbors_[write_pos[new_id]++] = new_neighbor;
+        }
+    }
+
+    has_inmem_adjacency_ = true;
+
+    // 释放原始邻接表内存 (CSR 已包含所有信息)
+    graph_.adjacency0.clear();
+    graph_.adjacency0.shrink_to_fit();
+
+    size_t adj_mb = (total_edges * 4 + (N + 1) * 4) / (1024 * 1024);
+    std::cout << "  [CSR] Built in-memory adjacency: " << total_edges << " edges, "
+              << adj_mb << " MB" << std::endl;
+}
+
+// 从内存 CSR 邻接表获取邻居
+const uint32_t* DiskHNSW::getInMemNeighbors(uint32_t new_id, uint32_t& out_count) const {
+    if (!has_inmem_adjacency_ || new_id >= graph_.num_nodes) {
+        out_count = 0;
+        return nullptr;
+    }
+    uint32_t start = adj_csr_offsets_[new_id];
+    uint32_t end = adj_csr_offsets_[new_id + 1];
+    out_count = end - start;
+    return &adj_csr_neighbors_[start];
+}
+
 std::vector<std::vector<DiskHNSW::SearchResult>>
 DiskHNSW::batchSearchEventDriven(const std::vector<float>& queries, size_t k, size_t batch_size) {
     std::vector<std::vector<SearchResult>> results;
@@ -1835,42 +1972,42 @@ DiskHNSW::batchSearchEventDriven(const std::vector<float>& queries, size_t k, si
             initQueryState(states[i], &queries[(batch_start + i) * dim], k, ef);
         }
 
-        // round-robin 事件驱动循环
-        int idle_count = 0;
+        // round-robin 事件驱动循环 (贪心版: 每个查询处理到 I/O miss 才 yield)
+        const int greedy_limit = 256;  // 每个 query 在一次调度中最多处理的候选数
         while (true) {
             bool all_done = true;
-            idle_count = 0;
+            int idle_count = 0;
 
             for (size_t i = 0; i < n; i++) {
                 if (states[i].done) continue;
-
                 all_done = false;
 
-                // 如果在等待 block, 先检查是否就绪
                 if (states[i].waitingBlockId) {
                     CachedBlock* blk = cache_->peekCachedBlockById(states[i].waitingBlockId);
                     if (blk) {
-                        states[i].waitingBlockId = 0;  // 就绪, 清除等待
+                        states[i].waitingBlockId = 0;
                     } else {
                         idle_count++;
-                        continue;  // yield 到下一个查询
+                        continue;
                     }
                 }
 
-                // 执行一步搜索
-                stepQueryState(states[i]);
+                // 贪心: 连续处理直到 I/O miss 或达到步数上限
+                int steps_this_round = 0;
+                while (!states[i].done && !states[i].waitingBlockId && steps_this_round < greedy_limit) {
+                    stepQueryState(states[i]);
+                    steps_this_round++;
+                }
+                if (states[i].waitingBlockId) idle_count++;
             }
 
             if (all_done) break;
 
-            // 如果所有未完成的查询都在等待 I/O, reap 并重试
             if (idle_count > 0) {
                 bool any_ready = false;
                 if (graph_prefetch_enabled_ && graph_prefetcher_) {
                     graph_prefetcher_->reapCompletions();
                 }
-
-                // 检查是否有等待的 block 已就绪
                 for (size_t i = 0; i < n; i++) {
                     if (states[i].done || !states[i].waitingBlockId) continue;
                     CachedBlock* blk = cache_->peekCachedBlockById(states[i].waitingBlockId);
@@ -1879,31 +2016,21 @@ DiskHNSW::batchSearchEventDriven(const std::vector<float>& queries, size_t k, si
                         any_ready = true;
                     }
                 }
-
                 if (!any_ready) {
-                    // 所有 I/O 都未完成, 等待至少一个完成
-                    if (graph_prefetch_enabled_ && graph_prefetcher_ &&
-                        graph_prefetcher_->inflight() > 0) {
-                        // 提交所有等待 block 的预取 (可能尚未提交)
-                        std::vector<uint32_t> need_prefetch;
-                        for (size_t i = 0; i < n; i++) {
-                            if (states[i].done || !states[i].waitingBlockId) continue;
-                            if (!cache_->isInCache(states[i].waitingBlockId)) {
-                                need_prefetch.push_back(states[i].waitingBlockId);
-                            }
+                    std::vector<uint32_t> need_prefetch;
+                    for (size_t i = 0; i < n; i++) {
+                        if (states[i].done || !states[i].waitingBlockId) continue;
+                        if (!cache_->isInCache(states[i].waitingBlockId)) {
+                            need_prefetch.push_back(states[i].waitingBlockId);
                         }
-                        if (!need_prefetch.empty()) {
-                            graph_prefetcher_->submitPrefetch(need_prefetch, true);
-                        }
-                        // 等待第一个完成
+                    }
+                    if (!need_prefetch.empty() && graph_prefetch_enabled_ && graph_prefetcher_) {
+                        graph_prefetcher_->submitPrefetch(need_prefetch, true);
                         graph_prefetcher_->waitForBlocks(
                             std::set<uint32_t>(need_prefetch.begin(), need_prefetch.end()));
-                    } else {
-                        // 无预取器: 同步加载第一个等待的 block
-                        for (size_t i = 0; i < n; i++) {
-                            if (states[i].done || !states[i].waitingBlockId) continue;
-                            cache_->getBlockById(states[i].waitingBlockId);
-                            states[i].waitingBlockId = 0;
+                    } else if (!need_prefetch.empty()) {
+                        for (uint32_t bid : need_prefetch) {
+                            cache_->getBlockById(bid);
                             break;
                         }
                     }

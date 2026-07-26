@@ -481,3 +481,103 @@ inline GraphStructure load_graph_structure_slim(const std::string& path) {
               << " (" << g.num_nodes << " nodes, " << upper_count << " upper)" << std::endl;
     return g;
 }
+
+// ============================================================
+// slim+adj 加载器: 加载标签、层级、上层节点+向量, 同时加载 L0 邻接表
+// 用于 multi-hop 预取: 邻接表常驻内存 (old_id 空间)
+// RSS: upper_vectors(~32MB) + labels(8MB) + levels(4MB) + upper_adj(~8MB) + L0_adj(~81MB) ≈ 133MB
+// ============================================================
+inline GraphStructure load_graph_structure_slim_adj(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) {
+        throw std::runtime_error("Cannot open file: " + path);
+    }
+
+    GraphStructure g;
+    g.slim = true;
+
+    GraphHeader hdr;
+    in.read(reinterpret_cast<char*>(&hdr), sizeof(GraphHeader));
+    uint32_t pad;
+    read_pod(in, pad);
+
+    if (hdr.magic != MAGIC_GRAPH) {
+        throw std::runtime_error("Invalid graph structure file: bad magic");
+    }
+
+    g.num_nodes = hdr.num_nodes;
+    g.dim = hdr.dim;
+    g.maxM = hdr.maxM;
+    g.maxM0 = hdr.maxM0;
+    g.entry_point = hdr.entry_point;
+    g.max_level = hdr.max_level;
+    g.data_size = hdr.data_size;
+
+    g.levels.resize(g.num_nodes);
+    in.read(reinterpret_cast<char*>(g.levels.data()), g.num_nodes * sizeof(int32_t));
+
+    size_t upper_count = 0;
+    for (uint32_t i = 0; i < g.num_nodes; i++) {
+        if (g.levels[i] > 0) upper_count++;
+    }
+
+    size_t vec_base = (size_t)in.tellg();
+    size_t data_size_bytes = (size_t)g.num_nodes * g.data_size;
+
+    std::cout << "  [slim+adj] Loading vectors for " << upper_count << " upper-layer nodes ("
+              << (upper_count * g.data_size / 1024 / 1024) << "MB, skipping "
+              << (data_size_bytes / 1024 / 1024) << "MB)" << std::endl;
+
+    for (uint32_t i = 0; i < g.num_nodes; i++) {
+        if (g.levels[i] > 0) {
+            in.seekg(vec_base + (size_t)i * g.data_size);
+            std::vector<float> vec(g.dim);
+            in.read(reinterpret_cast<char*>(vec.data()), g.data_size);
+            g.upper_vectors[i] = std::move(vec);
+        }
+    }
+
+    size_t label_base = vec_base + data_size_bytes;
+    in.seekg(label_base);
+    g.labels.resize(g.num_nodes);
+    in.read(reinterpret_cast<char*>(g.labels.data()), g.num_nodes * sizeof(uint64_t));
+
+    // ---- L0 邻接表 (全部加载, 用于 multi-hop 预取) ----
+    size_t adj0_base = (size_t)in.tellg();
+    g.adjacency0.resize(g.num_nodes);
+    size_t total_edges = 0;
+    for (uint32_t i = 0; i < g.num_nodes; i++) {
+        uint16_t cnt;
+        read_pod(in, cnt);
+        g.adjacency0[i].resize(cnt);
+        if (cnt > 0) {
+            in.read(reinterpret_cast<char*>(g.adjacency0[i].data()), cnt * sizeof(uint32_t));
+            total_edges += cnt;
+        }
+    }
+    std::cout << "  [slim+adj] Loaded L0 adjacency: " << total_edges << " edges ("
+              << (total_edges * 4 / 1024 / 1024) << "MB)" << std::endl;
+
+    // ---- 上层邻接表 ----
+    g.upper_adjacency.resize(g.num_nodes);
+    for (uint32_t i = 0; i < g.num_nodes; i++) {
+        if (g.levels[i] > 0) {
+            g.upper_adjacency[i].resize(g.levels[i] + 1);
+            for (int32_t lv = 1; lv <= g.levels[i]; lv++) {
+                uint16_t cnt;
+                read_pod(in, cnt);
+                g.upper_adjacency[i][lv].resize(cnt);
+                if (cnt > 0) {
+                    in.read(reinterpret_cast<char*>(g.upper_adjacency[i][lv].data()),
+                            cnt * sizeof(uint32_t));
+                }
+            }
+        }
+    }
+
+    in.close();
+    std::cout << "  [slim+adj] Loaded graph structure from " << path
+              << " (" << g.num_nodes << " nodes, " << upper_count << " upper, "
+              << total_edges << " edges)" << std::endl;
+    return g;
+}

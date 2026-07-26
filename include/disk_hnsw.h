@@ -216,6 +216,14 @@ private:
     std::vector<uint32_t> old_to_new_;
     std::vector<uint32_t> new_to_old_;
 
+    // ---- BFS-remapped L0 邻接表 (CSR 格式, 常驻内存) ----
+    // 用于 multi-hop 预取: 无需读 block 即可遍历邻居
+    // adj_csr_offsets_[i] .. adj_csr_offsets_[i+1] = 节点 i(new_id) 的邻居范围
+    // adj_csr_neighbors_[j] = 邻居的 new_id
+    std::vector<uint32_t> adj_csr_offsets_;   // size = N+1
+    std::vector<uint32_t> adj_csr_neighbors_; // size = total_edges
+    bool has_inmem_adjacency_ = false;
+
     // ---- BlockCache（new_id空间）----
     std::unique_ptr<BlockCache> cache_;
     size_t cache_slots_ = 0;
@@ -285,4 +293,13 @@ private:
     // ---- 事件驱动批量搜索内部方法 ----
     void initQueryState(QueryState& qs, const float* query, size_t k, size_t ef);
     void stepQueryState(QueryState& qs);
+    // 事件驱动: 处理多个候选直到 I/O miss 或完成, 返回处理的步数
+    int runQueryUntilMiss(QueryState& qs, int max_steps = 64);
+
+    // 构建 BFS-remapped CSR 邻接表 (从 graph_.adjacency0 + old_to_new_ 映射)
+    void buildInMemoryAdjacency();
+
+    // 从内存 CSR 邻接表获取邻居 (new_id 空间)
+    // 返回 nullptr + out_count=0 如果没有内存邻接表
+    const uint32_t* getInMemNeighbors(uint32_t new_id, uint32_t& out_count) const;
 };

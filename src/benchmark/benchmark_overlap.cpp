@@ -57,15 +57,14 @@ static std::vector<std::vector<uint64_t>> read_gt(const std::string& path, size_
     uint32_t n_queries, kk;
     in.read(reinterpret_cast<char*>(&n_queries), sizeof(uint32_t));
     in.read(reinterpret_cast<char*>(&kk), sizeof(uint32_t));
+    
+    // GT format: header(8B) then n * kk * uint64 indices (no distances)
+    size_t header_size = 8; // n_queries(4) + kk(4)
+    
     std::vector<std::vector<uint64_t>> gt(n);
     for (size_t i = 0; i < n; i++) {
         gt[i].resize(k);
-        // Read first k labels
         in.read(reinterpret_cast<char*>(gt[i].data()), k * sizeof(uint64_t));
-        // Skip remaining kk - k labels (file has kk labels per query)
-        if (kk > (uint32_t)k) {
-            in.seekg((size_t)(kk - k) * sizeof(uint64_t), std::ios::cur);
-        }
     }
     return gt;
 }
@@ -302,6 +301,16 @@ int main(int argc, char** argv) {
         r.rss_mb = getRSS_MB();
 
         size_t correct = 0;
+        // Debug: print first query comparison
+        if (!results.empty() && !hnsw_baseline.empty()) {
+            std::cout << "  [DEBUG] Q0 search results: ";
+            for (size_t i = 0; i < std::min((size_t)5, results[0].size()); i++)
+                std::cout << results[0][i].second << " ";
+            std::cout << "\n  [DEBUG] Q0 GT: ";
+            for (size_t i = 0; i < std::min((size_t)5, hnsw_baseline[0].size()); i++)
+                std::cout << hnsw_baseline[0][i].second << " ";
+            std::cout << std::endl;
+        }
         for (size_t q = 0; q < num_query; q++) {
             std::set<uint64_t> hset;
             for (const auto& [d, id] : hnsw_baseline[q]) hset.insert(id);
@@ -580,7 +589,7 @@ int main(int argc, char** argv) {
     // ---- F2-event: Event-driven multi-query concurrency ----
     // 测试 event-driven batch search: batch=4, batch=8
     if (!shouldSkip("event"))
-    for (size_t bs : {4, 8}) {
+    for (size_t bs : {4, 8, 16, 32, 64}) {
         if (bs > num_query) continue;
         std::cout << "\n[F2-event-" << bs << "] c" << mem_slots << "+GP, event-driven (bs=" << bs << ")..." << std::endl;
         {
