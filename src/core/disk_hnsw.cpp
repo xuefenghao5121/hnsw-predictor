@@ -1492,11 +1492,63 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
         return e ? std::atoi(e) : 0;
     }();
 
+    // 环境变量 TWO_STAGE 控制两阶段搜索 (1=PQ粗筛+精确精排, 0=关闭)
+    static const int kTwoStage = []() {
+        const char* e = std::getenv("TWO_STAGE");
+        return e ? std::atoi(e) : 0;
+    }();
+
+    // 环境变量 REFINE_EF 控制两阶段粗筛 ef (默认 200)
+    static const int kRefineEf = []() {
+        const char* e = std::getenv("REFINE_EF");
+        return e ? std::atoi(e) : 200;
+    }();
+
     std::priority_queue<std::pair<float, uint32_t>,
         std::vector<std::pair<float, uint32_t>>,
         std::greater<std::pair<float, uint32_t>>> top_candidates;
 
-    if (kBatchIO_N > 1) {
+    if (kTwoStage && pq_enabled_) {
+        // === Phase A: PQ 粗筛 (ADC 距离, 无向量 I/O) ===
+        size_t ef_coarse = std::max(ef, (size_t)kRefineEf);
+        auto coarse = searchLayer0(entryNewId, query, ef_coarse, visited);
+
+        std::vector<uint32_t> cand_ids;
+        cand_ids.reserve(coarse.size());
+        while (!coarse.empty()) {
+            cand_ids.push_back(coarse.top().second);
+            coarse.pop();
+        }
+
+        // === Phase B: 精确距离精排 (只对粗筛候选做批量 I/O) ===
+        std::set<uint32_t> needed_blocks;
+        for (uint32_t nid : cand_ids) {
+            needed_blocks.insert(route_table_ ? (*route_table_)[nid] : cache_->getBlockId(nid));
+        }
+        if (graph_prefetch_enabled_ && graph_prefetcher_) {
+            graph_prefetcher_->waitForBlocks(needed_blocks);
+        }
+
+        // 精确 L2 重排, 最大堆保持 top-k
+        std::priority_queue<std::pair<float, uint32_t>> refined;
+        for (uint32_t nid : cand_ids) {
+            const float* vec = cache_->getNodeVector(nid);
+            if (!vec) continue;
+            float d = l2Distance(query, vec);
+            if (refined.size() < k) {
+                refined.emplace(d, nid);
+            } else if (d < refined.top().first) {
+                refined.pop();
+                refined.emplace(d, nid);
+            }
+        }
+
+        // 转为最小堆返回 (与接口一致)
+        while (!refined.empty()) {
+            top_candidates.push(refined.top());
+            refined.pop();
+        }
+    } else if (kBatchIO_N > 1) {
         top_candidates = searchLayer0BatchIO(entryNewId, query, ef, visited, kBatchIO_N);
     } else if (kBeamWidth > 1) {
         top_candidates = searchLayer0Beam(entryNewId, query, ef, visited, kBeamWidth);

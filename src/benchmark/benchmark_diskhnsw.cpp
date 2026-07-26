@@ -113,6 +113,13 @@ int main(int argc, char** argv) {
     auto hnsw = std::make_unique<DiskHNSW>(graph_path, bfs_path, std::move(cache));
     hnsw->setEf(ef);
     hnsw->enableGraphPrefetch(true);
+
+    // PQ 模式: 检查 PQ_CODES_PATH 环境变量
+    const char* pq_path_env = std::getenv("PQ_CODES_PATH");
+    if (pq_path_env && pq_path_env[0]) {
+        hnsw->loadPQCodes(pq_path_env);
+    }
+
     hnsw->resetCacheStats();
     hnsw->resetGraphPrefetchStats();
 
