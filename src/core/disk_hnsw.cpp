@@ -365,7 +365,7 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         // ---- 时效性实验: lookahead 预取 ----
         // 偏看 candidate_set 里即将展开的后 N 个 candidate,提前预取它们邻居的 block
         // 不碰遍历顺序/lowerBound/visited/top_candidates -> recall 不受影响
-        if (kLookaheadHops > 0 && graph_prefetch_enabled_ && graph_prefetcher_) {
+        if (kLookaheadHops > 0 && graph_prefetch_enabled_ && graph_prefetcher_ && !pq_enabled_) {
             auto cs_copy = candidate_set;  // 拷贝, 不动原队列
             std::vector<uint32_t> la_blocks;
             int hops = 0;
@@ -412,8 +412,8 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
             std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
             // 回退路径：使用原始逻辑
-            // 提交预取
-            if (graph_prefetch_enabled_ && graph_prefetcher_) {
+            // 提交预取 (PQ 模式跳过: 不走向量 I/O, 预取只会堵精排队列)
+            if (graph_prefetch_enabled_ && graph_prefetcher_ && !pq_enabled_) {
                 std::vector<uint32_t> prefetch_blocks;
                 for (uint32_t nid : local_neighbors) {
                     uint32_t nblock = getBlockIdFast(nid);
@@ -500,7 +500,8 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         std::vector<uint32_t> local_neighbors(neighbors, neighbors + neighborCount);
 
         // ---- 提交预取 (1-hop, 热度排序但不丢充) ----
-        if (graph_prefetch_enabled_ && graph_prefetcher_) {
+        // PQ 模式跳过: 搜索不读向量, 预取只会堵 Phase B 精排队列
+        if (graph_prefetch_enabled_ && graph_prefetcher_ && !pq_enabled_) {
             std::vector<uint32_t> prefetch_blocks;
             for (uint32_t nid : local_neighbors) {
                 uint32_t neighbor_block = getBlockIdFast(nid);
@@ -549,8 +550,10 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
             // 不再需要 isInCache + getNodeVector 两次锁
             CachedBlock* nBlock = cache_->getCachedBlockById(neighbor_block);
             if (pq_enabled_) {
-                // PQ 模式: 不需要向量, 直接算 ADC 距离
-                float dist = pqDistance(query, neighborId);
+                // PQ 模式: ADC 距离; PQ_HYBRID=1 时 cache 命中用精确距离(提升粗筛质量), miss 用 PQ(零等待)
+                static const bool kPqHybrid = std::getenv("PQ_HYBRID") && std::atoi(std::getenv("PQ_HYBRID")) != 0;
+                const float* nvec = (kPqHybrid && nBlock) ? nBlock->getVector(neighborId) : nullptr;
+                float dist = nvec ? l2Distance(query, nvec) : pqDistance(query, neighborId);
                 if (top_candidates.size() < ef || lowerBound > dist) {
                     candidate_set.emplace(dist, neighborId);
                     top_candidates.emplace(dist, neighborId);
@@ -1521,11 +1524,15 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
         }
 
         // === Phase B: 精确距离精排 (只对粗筛候选做批量 I/O) ===
+        // 收集 miss 的 blocks, 一次性提交 io_uring 并行读 (NVMe 队列深度掩盖 I/O 延迟)
         std::set<uint32_t> needed_blocks;
         for (uint32_t nid : cand_ids) {
-            needed_blocks.insert(route_table_ ? (*route_table_)[nid] : cache_->getBlockId(nid));
+            uint32_t b = route_table_ ? (*route_table_)[nid] : cache_->getBlockId(nid);
+            if (!cache_->isInCache(b)) needed_blocks.insert(b);
         }
-        if (graph_prefetch_enabled_ && graph_prefetcher_) {
+        if (!needed_blocks.empty() && graph_prefetcher_) {
+            std::vector<uint32_t> bv(needed_blocks.begin(), needed_blocks.end());
+            graph_prefetcher_->submitPrefetch(bv, true);
             graph_prefetcher_->waitForBlocks(needed_blocks);
         }
 
