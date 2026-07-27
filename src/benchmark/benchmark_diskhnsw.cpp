@@ -149,8 +149,25 @@ int main(int argc, char** argv) {
     // Timed search
     std::vector<double> latencies(num_query);
     std::vector<std::vector<SearchResult>> results(num_query);
+    
+    // NUM_THREADS: >0 = concurrent search
+    const char* nt_env = std::getenv("NUM_THREADS");
+    int num_threads = nt_env ? atoi(nt_env) : 0;
+    
     auto t0 = std::chrono::high_resolution_clock::now();
-    if (batch_size > 0) {
+    if (num_threads > 0) {
+        // Multi-threaded concurrent search
+        std::cout << "Mode: CONCURRENT (threads=" << num_threads << ")" << std::endl;
+        std::vector<float> all_q(num_query * dim);
+        std::memcpy(all_q.data(), query_data.data(), all_q.size() * sizeof(float));
+        auto batch_results = hnsw->batchSearchConcurrent(all_q, k, num_threads);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        double total_s = std::chrono::duration<double>(t1 - t0).count();
+        for (int i = 0; i < num_query; i++) {
+            results[i] = batch_results[i];
+            latencies[i] = total_s / num_query * 1e6;
+        }
+    } else if (batch_size > 0) {
         // Non-blocking batch search
         std::vector<float> all_q(num_query * dim);
         std::memcpy(all_q.data(), query_data.data(), all_q.size() * sizeof(float));

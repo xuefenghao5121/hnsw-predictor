@@ -241,6 +241,9 @@ void DiskHNSW::buildPqDistTable(const float* query) {
     const uint32_t M = pq_params_.M;
     const uint32_t ksub = pq_params_.ksub;
     const uint32_t dsub = pq_params_.dsub;
+    // thread_local: 每个톴돌한 독립 distance table (多톴돌한안전)
+    static thread_local std::vector<float> tl_dist_table;
+    auto& pq_dist_table_ = tl_dist_table;
     pq_dist_table_.resize((size_t)M * ksub);
     const float* cb = pq_codebook_.data();
 
@@ -294,6 +297,9 @@ void DiskHNSW::buildPqDistTable(const float* query) {
 float DiskHNSW::pqDistance(const float* query, uint32_t node_id_new) const {
     // 查表快路径: 距离表已预计算 (buildPqDistTable)
     const uint8_t* code = &pq_codes_[(size_t)node_id_new * pq_params_.M];
+    // 使用 thread_local distance table (与 buildPqDistTable 一致)
+    static thread_local std::vector<float> tl_dist_table;
+    const auto& pq_dist_table_ = tl_dist_table;
     if (!pq_dist_table_.empty()) {
         const uint32_t M = pq_params_.M;
         const uint32_t ksub = pq_params_.ksub;
@@ -1676,7 +1682,9 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
         }
 
         if (kFineRerank && fine_rerank_ok_) {
-            // ---- 4KB 页粒度精排: cache hit 取向量, miss 按 4KB 页批量 io_uring 读 ----
+            // ---- 4KB 页粒度精排: cache hit 取向量, miss 按 4KB 页读 ----
+            // FINE_PREAD=1 时用 pread 替代 io_uring (线程安全, 多线程必须开启)
+            static const bool kFinePread = std::getenv("FINE_PREAD") && std::atoi(std::getenv("FINE_PREAD")) != 0;
             static const bool kProfFine = std::getenv("PROFILE_FINE") && std::atoi(std::getenv("PROFILE_FINE")) != 0;
             static double pf_collect = 0, pf_submit = 0, pf_first = 0, pf_iorest = 0, pf_compute = 0;
             static long pf_pages = 0, pf_cached = 0, pf_iters = 0, pf_n = 0;
@@ -1718,7 +1726,52 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                 if (cross) pages_needed.insert(page0 + 1);
             }
 
-            // 提交页读: FINE_MERGE=1 时相邻页合并为一次 8KB 读
+            if (kFinePread) {
+                // ---- pread 路径 (线程安全, 多线程并发用) ----
+                auto tp0 = std::chrono::high_resolution_clock::now();
+                std::unordered_map<uint32_t, std::unique_ptr<char[]>> page_cache;
+                page_cache.reserve(pages_needed.size());
+                for (uint32_t pg : pages_needed) {
+                    auto buf = std::make_unique<char[]>(4096);
+                    ssize_t r = pread(vec_blocks_fd_, buf.get(), 4096, (off_t)pg << 12);
+                    if (r == 4096) page_cache[pg] = std::move(buf);
+                }
+                auto tp1 = std::chrono::high_resolution_clock::now();
+                char tmp_vec_pread[512];
+                for (const auto& c : io_cands) {
+                    auto it0 = page_cache.find(c.page0);
+                    if (it0 == page_cache.end()) continue;
+                    const char* p0 = it0->second.get();
+                    const float* vec;
+                    if (!c.cross) {
+                        vec = reinterpret_cast<const float*>(p0 + c.oip);
+                    } else {
+                        auto it1 = page_cache.find(c.page0 + 1);
+                        if (it1 == page_cache.end()) continue;
+                        size_t first = 4096 - c.oip;
+                        std::memcpy(tmp_vec_pread, p0 + c.oip, first);
+                        std::memcpy(tmp_vec_pread + first, it1->second.get(), dim_ * sizeof(float) - first);
+                        vec = reinterpret_cast<const float*>(tmp_vec_pread);
+                    }
+                    consider(c.nid, vec);
+                    cache_->putFlatVector(c.nid, vec);
+                }
+                while (!refined.empty()) {
+                    top_candidates.push(refined.top());
+                    refined.pop();
+                }
+                if (kProfile) {
+                    auto tp2 = std::chrono::high_resolution_clock::now();
+                    double a = std::chrono::duration<double, std::micro>(tpA - tp0).count();
+                    double w = std::chrono::duration<double, std::micro>(tp1 - tpA).count();
+                    double r = std::chrono::duration<double, std::micro>(tp2 - tp1).count();
+                    acc_a += a; acc_wait += w; acc_rerank += r; acc_n++;
+                    if (acc_n % 200 == 0) {
+                        fprintf(stderr, "[PROFILE_TS] n=%ld PhaseA=%.0fus pread=%.0fus rerank=%.0fus\n",
+                                acc_n, acc_a/acc_n, acc_wait/acc_n, acc_rerank/acc_n);
+                    }
+                }
+            } else {
             static const bool kFineMerge = std::getenv("FINE_MERGE") && std::atoi(std::getenv("FINE_MERGE")) != 0;
             auto tf1 = std::chrono::high_resolution_clock::now();
             // page_buf[page] = buf_idx*2 + half (half=1 表示该页在合并读的后 4KB)
@@ -1860,6 +1913,7 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                             acc_n, acc_a/acc_n, acc_wait/acc_n);
                 }
             }
+            }  // end pread else
         } else {
         // ---- 块粒度精排 (原路径) ----
         // 收集 miss 的 blocks, 一次性提交 io_uring 并行读 (NVMe 队列深度掩盖 I/O 延迟)
@@ -2580,3 +2634,39 @@ DiskHNSW::batchSearchEventDriven(const std::vector<float>& queries, size_t k, si
     return results;
 }
 
+
+// ============================================================
+// 多线程并发搜索
+// ============================================================
+std::vector<std::vector<DiskHNSW::SearchResult>>
+DiskHNSW::batchSearchConcurrent(const std::vector<float>& queries, size_t k, size_t num_threads) {
+    size_t dim = dim_;
+    size_t total = queries.size() / dim;
+    std::vector<std::vector<SearchResult>> results(total);
+    
+    std::mutex mtx;
+    std::atomic<size_t> next_idx{0};
+    
+    auto worker = [&]() {
+        while (true) {
+            size_t i = next_idx.fetch_add(1);
+            if (i >= total) break;
+            
+            auto res = searchKnn(&queries[i * dim], k);
+            
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                results[i] = std::move(res);
+            }
+        }
+    };
+    
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (size_t t = 0; t < num_threads; t++)
+        threads.emplace_back(worker);
+    for (auto& t : threads)
+        t.join();
+    
+    return results;
+}
