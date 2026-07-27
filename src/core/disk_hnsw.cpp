@@ -1775,6 +1775,9 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                     bool is8k = (cqe.user_data >> 32) != 0;
                     int expect = is8k ? 8192 : 4096;
                     if (cqe.res != expect) {
+                        // 释放失败的 buffer, 避免泄漏 (关键!)
+                        int failed_code = page_buf[p0];
+                        if (failed_code >= 0) vec_ring_->freeBuffer(failed_code >> 1);
                         page_buf[p0] = -1;  // 标记失败
                         if (is8k) page_buf[p0 + 1] = -1;
                     }
