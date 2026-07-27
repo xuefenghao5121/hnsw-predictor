@@ -138,7 +138,37 @@ python3 scripts/gen_gt.py data/sift_base.fvecs data/sift1m_query200.fvecs \
 
 ## 运行 Benchmark
 
-### 单线程（推荐配置）
+### ⭐ 正式对比测试（唯一维护脚本，推荐）
+
+```bash
+# 默认: SIFT1M, cgroup 512M, 4 线程, k=10 ef=50 query=200, 3 轮取峰值
+bash scripts/compare_benchmark.sh
+
+# 可调参数（环境变量覆盖）
+MEM=512M THREADS=8 K=10 EF=50 NQ=200 RUNS=5 bash scripts/compare_benchmark.sh
+```
+
+这个脚本同时跑两个对比，方便直观对比：
+- **[A] DiskHNSW**：在 `cgroup MemoryMax=512M` 内存限制 + 多线程跑（磁盘向量搜索，省内存）
+- **[B] hnswlib native**：放开 cgroup 限制，全内存基线（性能天花板）
+
+公平对比三要素（脚本已内置）：
+1. **充分 warmup**：page cache 预热 + benchmark 内部 CPU 升频 spin + 全 query 预跑一轮
+2. **相同输入**：两者用完全一样的 query / GT / k / ef
+3. **多轮取峰值**：排除 CPU 调频和后台抢占带来的抖动
+
+> 参考结果（SIFT1M, 512M/4线程）：
+> | 方案 | Recall | RSS | QPS |
+> |------|--------|-----|-----|
+> | DiskHNSW (512M/4线程) | 95.70% | 319 MB | ~580 |
+> | hnswlib (全内存) | 95.25% | 726 MB | 数千~1万+ |
+>
+> 内存节省56%（319 vs 726 MB），recall 持平（甚至略高）。QPS 绝对值受当前机器 intel_pstate
+> 对 I/O bound 任务的调频限制，以相对对比为准。
+
+### 手动跑单个 benchmark（调试用）
+
+#### 单线程（推荐配置）
 ```bash
 TWO_STAGE=1 PQ_HYBRID=1 FINE_RERANK=1 FINE_BUFFERED=1 \
 VEC_BLOCKS_PATH=output/sift1m_vecblocks_64k.bin FLAT_VEC_MB=64 \
