@@ -21,6 +21,7 @@
 #include <atomic>
 #include <memory>
 #include <functional>
+#include <immintrin.h>
 
 #include "common.h"
 #include "layout_provider.h"
@@ -172,6 +173,15 @@ public:
             }
         }
         return nullptr;
+    }
+
+    // 软件预取 flat_vec 槽位 (owners tag + vector 首行), 掩盖随机访存延迟
+    void prefetchFlatSlot(uint32_t node_id) const {
+        if (flat_vec_num_slots_ > 0 && flat_vec_owners_) {
+            size_t slot = (size_t)node_id % flat_vec_num_slots_;
+            _mm_prefetch((const char*)&flat_vec_owners_[slot], _MM_HINT_T0);
+            _mm_prefetch((const char*)&flat_vec_data_[slot * dim_], _MM_HINT_T0);
+        }
     }
 
     // 插入 flat vec cache (FINE 精排回填热向量)

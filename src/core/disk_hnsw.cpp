@@ -503,7 +503,21 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
             struct PendingNeighbor { uint32_t neighborId; uint32_t blockId; };
             std::vector<PendingNeighbor> pending_neighbors;
 
-            for (uint32_t nid : local_neighbors) {
+            static const bool kPrefetchSW2 = !std::getenv("PREFETCH_SW") || std::atoi(std::getenv("PREFETCH_SW")) != 0;
+            constexpr int kPfDist2 = 6;
+
+            for (size_t j = 0; j < local_neighbors.size(); j++) {
+                uint32_t nid = local_neighbors[j];
+                if (kPrefetchSW2 && j + kPfDist2 < local_neighbors.size()) {
+                    uint32_t pfn = local_neighbors[j + kPfDist2];
+                    if (pfn < graph_.num_nodes) {
+                        if (route_table_) _mm_prefetch((const char*)&(*route_table_)[pfn], _MM_HINT_T0);
+                        if (pq_enabled_) {
+                            _mm_prefetch((const char*)&pq_codes_[(size_t)pfn * pq_params_.M], _MM_HINT_T0);
+                            cache_->prefetchFlatSlot(pfn);
+                        }
+                    }
+                }
                 if (nid >= graph_.num_nodes) continue;
                 if (visited.isVisited(nid)) continue;
                 visited.markVisited(nid);
@@ -612,8 +626,24 @@ DiskHNSW::searchLayer0(uint32_t entry_new_id, const float* query, size_t ef,
         };
         std::vector<PendingNeighbor> pending_neighbors;
 
+        // 软件预取开关 (PREFETCH_SW=0 关闭): pipeline 提前拉 route/pq_code/flat_vec 行
+        static const bool kPrefetchSW = !std::getenv("PREFETCH_SW") || std::atoi(std::getenv("PREFETCH_SW")) != 0;
+        constexpr int kPfDist = 6;
+
         for (uint32_t j = 0; j < local_neighbors.size(); j++) {
             uint32_t neighborId = local_neighbors[j];
+
+            // pipeline 预取 j+kPfDist 处的间接寻址目标
+            if (kPrefetchSW && j + kPfDist < local_neighbors.size()) {
+                uint32_t pfn = local_neighbors[j + kPfDist];
+                if (pfn < graph_.num_nodes) {
+                    if (route_table_) _mm_prefetch((const char*)&(*route_table_)[pfn], _MM_HINT_T0);
+                    if (pq_enabled_) {
+                        _mm_prefetch((const char*)&pq_codes_[(size_t)pfn * pq_params_.M], _MM_HINT_T0);
+                        cache_->prefetchFlatSlot(pfn);
+                    }
+                }
+            }
 
             if (neighborId >= graph_.num_nodes) continue;
             if (visited.isVisited(neighborId)) continue;
@@ -1663,6 +1693,14 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
             struct CandIO { uint32_t nid; uint32_t page0; uint16_t oip; bool cross; };
             std::vector<CandIO> io_cands;
             std::set<uint32_t> pages_needed;
+            // 批量预取 route+slot 表行 (间接寻址的两级随机访存, 发射后乱序重叠)
+            static const bool kPfCollect = !std::getenv("PREFETCH_SW") || std::atoi(std::getenv("PREFETCH_SW")) != 0;
+            if (kPfCollect) {
+                for (uint32_t nid : cand_ids) {
+                    if (route_table_) _mm_prefetch((const char*)&(*route_table_)[nid], _MM_HINT_T0);
+                    _mm_prefetch((const char*)&node_slot_table_[nid], _MM_HINT_T0);
+                }
+            }
             for (uint32_t nid : cand_ids) {
                 uint32_t b = route_table_ ? (*route_table_)[nid] : cache_->getBlockId(nid);
                 // 只查 cache 不触发加载 (getNodeVector miss 会同步读 64KB block!)
