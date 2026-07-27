@@ -24,3 +24,4 @@ __pycache__/
 
 # hnswlib is a submodule/external dependency
 hnswlib/
+output2/

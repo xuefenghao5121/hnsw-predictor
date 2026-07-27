@@ -64,45 +64,79 @@ g++ -O3 -std=c++17 -march=native -I hnswlib -I include \
 
 ## 数据准备 Pipeline
 
-以 SIFT1M（128 维，100 万向量）为例：
+以 SIFT1M（128 维，100 万向量）为例。**7 个步骤有严格的先后依赖**，下面每步都说明它
+产出什么、下一步为什么需要它。
 
-### Step 1: 构建 HNSW 图
+> ### ⚠️⚠️ 三条铁律（不遵守 recall 直接崩到 <1%）
+>
+> 1. **一套数据从头到尾**：`build_index`、`train_pq.py`、`gen_gt.py` 必须用**同一个**
+>    base.fvecs。graph 的 node id、PQ codes 的行号、GT 的邻居 id 是**同一个 id 空间**
+>    （base 向量的原始行号）。换了 base 数据其中一环，三者对不上，recall 归零。
+> 2. **graph 与 blocks/route/vecblocks 必须同批生成**：Step 4/5 的块文件是从 Step 2 的
+>    graph 算出 offset 的。**重新跑 Step 1-2 覆盖了 graph，就必须重跑 Step 4-5**，否则
+>    offset 错位，recall 崩。（不要把新旧 output 目录的文件混着用。）
+> 3. **PQ 的 M 要匹配维度**：SIFT dim=128 用 **M=32**；Deep dim=96 用 M=8。M 用错
+>    （比如 128 维用了 M=8）PQ 粗筛精度极差，recall≈0。
+
+### Step 1: 构建 HNSW 图 → `index.bin`
 ```bash
-./build/build_index data/test_1m.fvecs output/sift1m_index.bin 16 200
+./build/build_index data/sift_base.fvecs output/sift1m_index.bin 16 200
 ```
+产出 hnswlib 原生索引（含图 + 全部向量）。参数 `M=16 ef_construction=200`。
+**下一步要从中剥离出精简图结构。**
 
-### Step 2: 提取图结构
+### Step 2: 提取图结构 → `graph.bin`
 ```bash
 ./build/extract_graph output/sift1m_index.bin output/sift1m_graph.bin 128
 ```
+从 index 剥离出 DiskHNSW 用的图（节点层级 + 上层向量 + labels + L0 邻接表 CSR），
+丢掉 L0 全量向量。**这是后面所有块文件的 offset 基准，一旦重生成，Step 4/5 必须跟着重跑。**
 
-### Step 3: BFS 重排（局部性优化）
+### Step 3: BFS 重排 → `bfs.bin`
 ```bash
 ./build/bfs_reorder output/sift1m_graph.bin output/sift1m_bfs.bin
 ```
+按图的 BFS 遍历顺序给节点重新编号，让图上相邻的节点在磁盘上也相邻（空间局部性），
+提升块内命中率。**产出 old_id↔new_id 映射，Step 4/5 按这个顺序摆放向量。**
 
-### Step 4: 生成向量块文件（Vec-Only 格式）
+### Step 4: 生成向量块文件（Vec-Only）→ `vecblocks_64k.bin` (+ `_route.bin`)
 ```bash
 ./build/write_blocks_veconly output/sift1m_graph.bin output/sift1m_bfs.bin \
     output/sift1m_vecblocks_64k.bin 65536
-# 同时生成 route table: output/sift1m_vecblocks_64k_route.bin
+# 同时生成配套 route: output/sift1m_vecblocks_64k_route.bin
 ```
+把向量按 BFS 顺序打包成 64KB 块（**只存向量，不含邻接表**），供 Phase B 精排按 4KB 页
+粒度读取。**route 表和块文件必须同一次调用产出，配套使用。**
 
-### Step 5: 生成旧格式块文件（BlockCache 用）
+### Step 5: 生成旧格式块文件（BlockCache 用）→ `blocks_64k.bin` + `route_64k.bin`
 ```bash
 ./build/write_blocks output/sift1m_graph.bin output/sift1m_bfs.bin \
     output/sift1m_blocks_64k.bin 65536
 ./build/gen_route output/sift1m_blocks_64k.bin output/sift1m_route_64k.bin
 ```
+生成含邻接表的 64KB 块（BlockCache/fallback 路径用）及其路由表。
 
-### Step 6: 训练 PQ 编码
+### Step 6: 训练 PQ 编码 → `pqco_*.bin`
 ```bash
-python3 scripts/train_pq.py
-# 输出: output/pqco_sift1m_M32_correct.bin
+# 用法: python3 scripts/train_pq.py <base.fvecs> <输出.bin> [M]
+python3 scripts/train_pq.py data/sift_base.fvecs output/pqco_sift1m_M32_correct.bin 32
 ```
+用 faiss 把 base 向量压缩成 PQ codes（codebook + 每向量 M 字节），供 Phase A 粗筛
+做零 I/O 的 ADC 近似距离。
+- **M 可通过第 3 个参数自定义**；缺省时按维度自动选（128→32, 96→8）。
+- **必须用与 Step 1 相同的 base 数据**（PQ codes 按 base 原始行号编码，与 graph node id 对齐）。
+- 脚本末尾打印重建 MSE 和 ADC top-10 overlap 自检；SIFT+M32 的 overlap 应 >90%。
 
-### Step 7: 准备 Ground Truth
-GT 文件格式：8B header (n_queries:u32 + k:u32) + n×k 个 u64 向量 ID。
+### Step 7: 准备 Ground Truth → `gt*.bin`
+```bash
+# 用法: python3 scripts/gen_gt.py <base.fvecs> <query.fvecs> <gt输出.bin> [K]
+python3 scripts/gen_gt.py data/sift_base.fvecs data/sift1m_query200.fvecs \
+    data/sift1m_gt200.bin 10
+```
+对每个 query 在 base 里暴力精确 L2 算出真实 top-K（faiss `IndexFlatL2`），benchmark 用它算 recall。
+- **GT 的邻居 id 是 base 原始行号**，与 graph/PQ 同一 id 空间。
+- **生成时的 K 必须与运行 benchmark 时的 K 一致**（见下方 recall 陷阱）。
+- 文件格式：8B header (`n_queries:u32 + K:u32`) + n×K 个 u64 邻居 id（仅 id，无距离）。
 
 ---
 
@@ -141,6 +175,28 @@ PQ_CODES_PATH=output/pqco_sift1m_M32_correct.bin \
 ```bash
 systemd-run --user --scope -p MemoryMax=512M -p CPUQuota=400% \
     <上面的命令>
+```
+
+### ⚠️ recall 不对？先查这四个坑
+
+跑出来 recall 很低（<90% 甚至 <1%），几乎都是数据准备环节不一致，不是算法问题：
+
+| 现象 | 根因 | 修复 |
+|------|------|------|
+| recall ≈ **0%** | PQ 的 M 与维度不匹配（如 128 维用了 M=8）| 用 `train_pq.py <base> <out> 32` 重训（SIFT 用 M=32）|
+| recall ≈ **0.x%** | graph 与 blocks/route/vecblocks 不配套（重跑了 Step 1-2 但没重跑 Step 4-5）| 同一批重新生成 Step 2 → Step 4/5 的全部文件 |
+| recall 偏低且乱跳 | benchmark 运行的 `K` 与 GT 生成的 `K` 不一致 | `gen_gt.py` 生成时的 K 与命令行最后一个参数 K 保持相等 |
+| recall 偏低 | base / query / GT 不是同一数据集 | 三者用同一 base；GT 用对应 query 重新 `gen_gt.py` |
+
+> **read_gt 的行为**：benchmark 按运行时的 K 逐行读 GT，但 GT 文件 header 里存的是生成时的
+> K。若两者不等，从第二行起 offset 就错位，recall 全错。**所以生成 K 与测试 K 必须一致。**
+
+### 一键复现（推荐）
+为避免上述坑，直接用脚本一次性生成全套配套文件：
+```bash
+# 用法: bash scripts/build_pipeline.sh <base.fvecs> <前缀> <M>
+bash scripts/build_pipeline.sh data/sift_base.fvecs sift1m 32
+# 产出 output/<前缀>_{index,graph,bfs,blocks_64k,route_64k,vecblocks_64k}.bin + pqco_<前缀>_M<M>.bin
 ```
 
 ---
