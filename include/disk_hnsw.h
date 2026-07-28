@@ -263,6 +263,7 @@ private:
     // ---- 细粒度精排读 (FINE_RERANK=1): 候选向量 4KB 页粒度读, I/O 64KB→4KB (16x↓) ----
     std::vector<uint16_t> node_slot_table_;     // node -> block 内 slot (2MB @1M)
     std::vector<uint32_t> block_data_offset_;   // block -> 向量区 data_offset
+    std::vector<uint32_t> vec_route_table_;     // node -> vecblocks block_id (修复 blocks/vecblocks ID 不一致 bug)
     std::unique_ptr<IoUring> vec_ring_;         // 4KB buffer pool ring (独立于 block 预取 ring)
     int vec_blocks_fd_ = -1;
     uint32_t vec_block_size_ = 0;

@@ -1714,9 +1714,12 @@ std::vector<DiskHNSW::SearchResult> DiskHNSW::searchKnn(const float* query, size
                 }
             }
             for (uint32_t nid : cand_ids) {
-                uint32_t b = route_table_ ? (*route_table_)[nid] : cache_->getBlockId(nid);
+                // 用 vecblocks 专属路由表 (修复: blocks 文件和 vecblocks 文件 block ID 不一致)
+                uint32_t b = vec_route_table_[nid];
                 // 只查 cache 不触发加载 (getNodeVector miss 会同步读 64KB block!)
-                if (CachedBlock* cb = cache_->getCachedBlockById(b)) {
+                // 注意: 这里用 blocks 文件的路由表查 block cache, 再用 vecblocks 路由表查 vecblocks
+                uint32_t b_cache = route_table_ ? (*route_table_)[nid] : cache_->getBlockId(nid);
+                if (CachedBlock* cb = cache_->getCachedBlockById(b_cache)) {
                     if (const float* v = cb->getVector(nid)) { consider(nid, v); continue; }
                 }
                 uint64_t off = 4096ull + (uint64_t)b * vec_block_size_
@@ -2089,6 +2092,7 @@ bool DiskHNSW::buildFineRerank(const std::string& blocks_path, uint32_t num_node
     vec_block_size_ = block_size;
 
     node_slot_table_.assign(num_nodes, 0);
+    vec_route_table_.assign(num_nodes, 0);
     block_data_offset_.assign(num_blocks, 0);
 
     // 每 block 读 header(16B) + node_ids(4B×cnt), 建 slot 表
@@ -2108,7 +2112,10 @@ bool DiskHNSW::buildFineRerank(const std::string& blocks_path, uint32_t num_node
         uint32_t max_cnt = (4096 - 16) / 4;
         if (cnt > max_cnt) { close(fd); return false; }  // 超出 4KB 窗口(cnt≤126 不会发生)
         for (uint32_t i = 0; i < cnt; i++) {
-            if (ids[i] < num_nodes) node_slot_table_[ids[i]] = (uint16_t)i;
+            if (ids[i] < num_nodes) {
+                node_slot_table_[ids[i]] = (uint16_t)i;
+                vec_route_table_[ids[i]] = b;
+            }
         }
     }
 
