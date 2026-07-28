@@ -287,34 +287,156 @@ bash scripts/build_pipeline.sh data/sift_base.fvecs sift1m 32
 
 ## 架构概述
 
+### 核心问题：为什么 hnswlib 需要 726MB？
+
+hnswlib 把**全部 100 万条 128 维向量**加载到内存（488MB 向量 + 图结构 + 标签 ≈ 726MB）。搜索时每访问一个节点都要读它的向量算距离，全部在内存中完成，所以快（QPS 11800+），但内存是硬需求——512MB cgroup 下直接 OOM。
+
+### DiskHNSW 的核心思路：把向量从内存挪到磁盘
+
+关键洞察：HNSW 一次查询只访问约 5000 个节点（100万中的 0.5%），全量向量常驻内存意味着 99.5% 的内存浪费。但直接把向量放磁盘会导致每次邻居访问都等 I/O，延迟爆炸。
+
+解法是**分层卸载 + 两阶段搜索**：
+- 图结构（邻接表）常驻内存，保证图遍历零 I/O
+- 向量用 PQ 压缩到 32 字节/条常驻内存，做粗筛（Phase A）
+- 只对粗筛出的 ~100 个候选读真实向量做精排（Phase B），I/O 量从 488MB 降到 ~50KB/query
+
+### 内存布局：留什么在内存，放什么到磁盘
+
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    常驻内存 (~120MB)                      │
-│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
-│  │ 上层图+向量   │  │ L0 CSR邻接表  │  │ PQ Codes 32MB │  │
-│  │ (63K nodes)  │  │ (84MB)       │  │ + Codebook    │  │
-│  └──────────────┘  └──────────────┘  └───────────────┘  │
-│  ┌──────────────┐  ┌──────────────┐                     │
-│  │ route_table  │  │ slot_table   │  ← 间接寻址表       │
-│  │ (4MB)        │  │ (2MB)        │                     │
-│  └──────────────┘  └──────────────┘                     │
-├─────────────────────────────────────────────────────────┤
-│              按需 I/O (page cache 热区)                  │
-│  ┌──────────────┐  ┌──────────────┐                     │
-│  │ VecBlocks    │  │ FlatVecCache │  ← FLAT_VEC_MB 控制 │
-│  │ (磁盘, 496MB) │  │ (内存, 64MB) │                     │
-│  └──────────────┘  └──────────────┘                     │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    常驻内存 (~272MB)                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐      │
+│  │ 上层图+向量   │  │ L0 CSR邻接表  │  │ PQ Codes 30MB │      │
+│  │ (63K, 30MB)  │  │ (84MB)       │  │ + Codebook    │      │
+│  └──────────────┘  └──────────────┘  └───────────────┘      │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐      │
+│  │ route_table  │  │ slot_table   │  │ labels+levels │      │
+│  │ (4MB)        │  │ (2MB)        │  │ (12MB)        │      │
+│  └──────────────┘  └──────────────┘  └───────────────┘      │
+├─────────────────────────────────────────────────────────────┤
+│              按需 I/O (page cache 热区)                      │
+│  ┌──────────────┐  ┌──────────────┐                         │
+│  │ VecBlocks    │  │ FlatVecCache │  ← FLAT_VEC_MB 控制     │
+│  │ (磁盘, 496MB) │  │ (内存, 64MB) │                         │
+│  └──────────────┘  └──────────────┘                         │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 搜索流程（两阶段）
+**常驻内存组件**（为什么必须在内存）：
 
-1. **贪心下降**：在上层图（内存）中找到 Layer 0 入口点
-2. **Phase A — PQ 粗筛**：在 Layer 0 用 PQ ADC 距离做 best-first 搜索，收集 `REFINE_EF` 个候选
-   - `PQ_HYBRID=1` 时，如果候选向量在 flat vec cache 中命中，用精确距离替代 PQ（提升质量）
-3. **Phase B — 精确精排**：对候选集读取真实向量做精确 L2，保留 top-K
-   - `FINE_BUFFERED=1`：用 buffered I/O，热数据走 page cache 零磁盘 I/O
-   - `FINE_PREAD=1`：用 `pread` 替代 io_uring（多线程安全）
+| 组件 | 大小 | 作用 | 必须在内存的原因 |
+|------|------|------|----------------|
+| 上层节点向量 | 30MB | 63K 个 Layer 1+ 节点的向量 | 贪心下降每层查几个节点，需快速算距离 |
+| L0 邻接表 CSR | 84MB | 2120万条边 | 搜索时频繁遍历邻居列表，不能等 I/O |
+| PQ codes | 30MB | 100万 × 32字节 | Phase A 粗筛的压缩向量，替代真实向量 |
+| 路由表 | 4MB | node_id -> block_id | 间接寻址，每次邻居访问都要查 |
+| slot 表 | 2MB | node_id -> block内偏移 | Phase B 精排定位向量位置 |
+| labels + levels | 12MB | 结果返回 + 层级判断 | 基础元数据 |
+
+**磁盘上**（按需读取）：
+- 全量向量数据 496MB，按 BFS 顺序打包成 64KB 块
+- 只在 Phase B 精排时按 4KB 页粒度读取
+
+### 搜索流程：两阶段搜索的每一步
+
+```
+查询到达
+    │
+    ├─ Step 1: 贪心下降 [纯内存, 零 I/O]
+    │   上层图 + 上层向量 -> 找到 Layer 0 入口
+    │
+    ├─ Step 2: Phase A - PQ 粗筛 [纯内存, 零向量 I/O]
+    │   │  CSR 邻接表 (84MB) -> 遍历邻居
+    │   │  PQ codes (30MB) -> ADC 近似距离
+    │   │  PQ dist table (预计算) -> SIMD 查表
+    │   │  PQ_HYBRID: flat vec cache 命中 -> 精确 L2
+    │   └─ 产出: top-100 候选 (PQ 近似排序)
+    │
+    ├─ Step 3: Phase B - 精确精排 [按需 I/O]
+    │   │  候选 -> 检查 block cache / flat vec cache
+    │   │  miss 候选 -> 收集 4KB 页号 -> 批量 io_uring/pread
+    │   │  FINE_BUFFERED: page cache 热区零磁盘 I/O
+    │   │  精确 L2 重排 -> top-K
+    │   └─ 产出: 最终 top-K 结果
+    │
+    └─ 返回结果
+```
+
+#### Step 1: 贪心下降（纯内存）
+
+从最高层逐层下降到 Layer 1，在每一层遍历当前节点的邻居，如果有更近的就移动过去。
+完全在内存中操作上层向量和上层邻接表，零 I/O。
+
+**目的**：为 Layer 0 搜索找到好的起点，避免从随机位置开始。
+
+#### Step 2: Phase A - PQ 粗筛（零向量 I/O）
+
+这是内存卸载的关键。Layer 0 搜索过程与标准 HNSW best-first 搜索完全一致（维护
+candidate_set 最小堆 + top_candidates 最大堆），但**距离计算用 PQ 近似替代精确 L2**：
+
+1. **`buildPqDistTable(query)`**：预计算 `[M][ksub]` 距离表，`table[m][k] = |query子向量m -
+   中心点k|²`。AVX2 一次处理 2 个中心点，~16μs。
+2. **`pqDistance()`**：查 PQ code（32 字节），32 次查表加法得到近似 L2。
+   退化为查表后无需访问真实向量，**100 万向量压缩到 30MB 常驻内存**。
+3. **`PQ_HYBRID=1`**：cache 命中的节点用精确 L2 替代 PQ，提升粗筛质量
+   （recall 从 ~95.2% 升到 95.7%）。
+4. **`PREFETCH_SW=1`**：`_mm_prefetch` pipeline 距离 6，消除间接寻址
+   (route_table -> pq_codes -> flat_vec) 的 cache miss stall。
+
+**产出**：`REFINE_EF=100` 个候选节点。
+
+**为什么这是核心创新**：标准 HNSW 每展开一个节点都要读向量（512 字节），100万向量
+= 488MB 内存。PQ 把每条向量压到 32 字节，30MB 常驻内存，图搜索过程零向量 I/O。
+代价是距离不精确，由 Phase B 精排弥补。
+
+#### Step 3: Phase B - 精确精排（按需 I/O）
+
+Phase A 的 100 候选距离是 PQ 近似的，Phase B 读真实向量算精确 L2 重排出 top-K：
+
+1. **检查 cache hit**：先看候选向量是否在 block cache 或 flat vec cache 中，命中则零 I/O。
+2. **4KB 页粒度读**：miss 候选按 4KB 页对齐，收集页号，用 io_uring（单线程）或
+   pread（多线程）批量提交。**I/O 量 = 100 × 512B ≈ 50KB**（而非 488MB 全量）。
+3. **跨页向量处理**：SIFT 向量 512B，slot%8==6 时跨两个 4KB 页，有专门拼接逻辑。
+4. **`FINE_BUFFERED=1`**：buffered I/O 吃 page cache，重复查询的候选页热态零磁盘 I/O
+   （io_rest ≈ 1μs/query）。
+
+**为什么 4KB 而非 64KB**：100 候选散布在 ~83 个 block，按 block 读要 5.3MB/query；
+按 4KB 页读只需 ~470KB/query，**I/O 减 13 倍**。
+
+### 为什么能卸载内存——逻辑链条
+
+```
+全量向量 488MB（内存装不下 @512M cgroup）
+    ↓ PQ 压缩 (488MB -> 30MB)
+PQ codes 常驻内存，替代向量做 Phase A 粗筛
+    ↓ Phase A: PQ 粗筛零向量 I/O，选出 100 候选
+    ↓ Phase B: 只读 100 个候选的真实向量 (4KB 页粒度)
+    ↓ I/O 量 = 100 × 512B ≈ 50KB/query（而非 488MB）
+    ↓ page cache 热区：第二次查询命中率 >99%
+-> 512MB cgroup 下 recall 95.70%，hnswlib 726MB 直接 OOM
+```
+
+### 优化措施在链条中的位置
+
+| 优化 | 阶段 | 解决的瓶颈 | 机制 | QPS 提升 |
+|------|------|-----------|------|---------|
+| BFS 重排 | 数据准备 | cache 命中率低 | 图上相邻节点物理相邻，命中率 86.8% | 基线 |
+| PQ 粗筛 | Phase A | 向量不在内存 | 32B 近似距离替代 512B 精确距离 | 53->595 |
+| PQ_HYBRID | Phase A | PQ 近似精度差 | cache 命中用精确 L2，miss 用 PQ | recall +1% |
+| SIMD PQ LUT | Phase A | PQ 距离计算慢 | 预计算 [32][256] 表 + AVX2 查表 | 2141->2643 |
+| FINE_RERANK | Phase B | 精排 I/O 量太大 | 4KB 页粒度读替代 64KB block 读 | 595->867 |
+| FINE_BUFFERED | Phase B | 磁盘 I/O 延迟 | page cache 热区，重复查询零磁盘 I/O | 867->2141 |
+| SW 预取 | Phase A+B | 间接寻址 cache miss | `_mm_prefetch` pipeline 距离 6 | 2570->2780 |
+| 多线程 | 整体 | 单线程吞吐不够 | 4 线程 pread 并发，thread_local PQ table | 2780->5808 |
+
+### 为什么 recall 能反超 hnswlib
+
+hnswlib 全内存 recall 95.25%，DiskHNSW 95.70%，反超 0.45%：
+
+1. **两阶段搜索本身就是 recall 提升手段**：Phase A 用大 ef（100 vs hnswlib 的 50）做粗筛，
+   Phase B 精排。等价于 hnswlib 用 ef=100 搜索但只返回 top-10，自然 recall 更高。
+2. **PQ_HYBRID 让粗筛更准**：cache 命中节点用精确距离，减少 PQ 近似误判。
+3. **代价是速度**：QPS 6322 vs hnswlib 11862，慢 ~1.9x，但用一半内存换来。
 
 ### 数据文件说明
 
@@ -323,9 +445,9 @@ bash scripts/build_pipeline.sh data/sift_base.fvecs sift1m 32
 | `*_graph.bin` | HARG | 图结构：节点层级 + 上层向量 + labels + L0邻接表 |
 | `*_bfs.bin` | BFS | BFS 重排映射：old_id ↔ new_id |
 | `*_blocks_64k.bin` | HKLB | 64KB 块文件（含邻接表，BlockCache 用） |
-| `*_route_64k.bin` | ROUTE | 节点→块映射表 |
+| `*_route_64k.bin` | ROUTE | 节点->块映射表 |
 | `*_vecblocks_64k.bin` | HKLB | Vec-Only 块文件（仅向量，FINE_RERANK 用） |
-| `*_vecblocks_64k_route.bin` | ROUTE | Vec-Only 的节点→块映射（**必须与 vecblocks 配套**） |
+| `*_vecblocks_64k_route.bin` | ROUTE | Vec-Only 的节点->块映射（**必须与 vecblocks 配套**） |
 | `pqco_*.bin` | PQCO/OPQ1 | PQ 编码：codebook + codes |
 
 > ⚠️ **重要**：vecblocks 文件和它的 route table 必须配套生成（同一次 `write_blocks_veconly` 调用）。混用不同版本的文件会导致 offset 错误、recall 暴跌。
