@@ -428,6 +428,7 @@ PQ codes 常驻内存，替代向量做 Phase A 粗筛
 | FINE_BUFFERED | Phase B | 磁盘 I/O 延迟 | page cache 热区，重复查询零磁盘 I/O | 867->2141 |
 | SW 预取 | Phase A+B | 间接寻址 cache miss | `_mm_prefetch` pipeline 距离 6 | 2570->2780 |
 | 多线程 | 整体 | 单线程吞吐不够 | 4 线程 pread 并发，thread_local PQ table | 2780->5808 |
+| CSR Delta+Varint | 数据结构 | CSR 邻接表内存占用大 | delta+varint 压缩，84->47MB (1.8x) | RSS -32MB，QPS -4% |
 
 ### 为什么 recall 能反超 hnswlib
 
@@ -497,6 +498,68 @@ hnsw-predictor/
 ├── hnswlib/               # HNSW 库（外部依赖）
 └── Makefile
 ```
+
+---
+
+## 优化日志
+
+记录已完成的优化措施，供后续开发者参考。每条记录包含：动机、做法、效果、代价。
+
+### P0: CSR Delta+Varint 压缩 (2026-07-28)
+
+**动机**：随着图规模增长（10M/100M），L0 CSR 邻接表线性增长（1M=84MB → 10M=888MB →
+100M=8.9GB），成为内存瓶颈。需要先压缩 CSR 延缓上磁盘的时间点。
+
+**数据分析**：对 SIFT1M BFS-ordered CSR 的 delta 分布分析发现：
+- 4.2% 的 delta=1，32% 的 delta<1024（局部边）
+- 68% 的 delta≥1024（长程边，HNSW small-world 特性决定）
+- BVGraph reference 压缩不适用（BFS 相邻节点 Jaccard 仅 0.023，几乎无重复邻接表）
+- 纯 delta+varint 理论压缩比 1.7x
+
+**做法**：
+1. `adj_csr_neighbors_`（`vector<uint32_t>`，4 bytes/edge）改为 `adj_csr_compact_`
+   （`vector<uint8_t>`，delta+varint 编码的字节流）
+2. `adj_csr_offsets_`（节点->edge offset）改为 `adj_csr_byte_offsets_`（节点->byte offset）
+3. `getInMemNeighbors()` 从直接返回指针改为解码到 `thread_local` buffer
+4. 解码开销：~100-200ns/节点（21 个 delta 的 varint 解码），图搜索约 5000 节点/query
+5. 保留 `adj_csr_offsets_`（uint32 N+1）用于快速查度数，不再存 neighbors 数组
+
+**代码变更**：
+- `include/disk_hnsw.h`：新增 `adj_csr_compact_`、`adj_csr_byte_offsets_`、`csr_compressed_`、
+  `csr_decode_buf_` (thread_local) 成员；`getInMemNeighbors` 去掉 const
+- `src/core/disk_hnsw.cpp`：重写 `buildInMemoryAdjacency()` 做 delta+varint 编码；
+  新增 `decodeCsrNeighbors()` 解码方法；`getInMemNeighbors()` 分压缩/非压缩两条路径
+- `common.h` 中已有 `varint_encode/decode` 和 `delta_varint_encode/decode` 函数，直接复用
+
+**效果** (SIFT1M, 512MB cgroup, 标准 200 queries, K=10, EF=50)：
+
+| 指标 | 改造前 | 改造后 | 变化 |
+|------|--------|--------|------|
+| CSR 内存 | 84 MB | 47 MB | **-37 MB, 1.8x 压缩** |
+| 单线程 RSS | 301 MB | 269 MB | **-32 MB** |
+| 单线程 QPS | 2177 | 2092 | -3.9%（解码开销） |
+| 单线程 Recall | 95.70% | 95.70% | ✅ 不变 |
+| 4线程 RSS | 319 MB | 286 MB | **-33 MB** |
+| 4线程 QPS | 6322 | 6070 | -4.0% |
+| 4线程 Recall | 95.70% | 95.70% | ✅ 不变 |
+
+**代价**：QPS 下降 ~4%（每查询多 ~1ms 解码时间），换取 32MB 内存节省。
+
+**规模推演**：
+
+| 规模 | CSR 原始 | CSR 压缩后 | 压缩后总常驻（估） | 512M 可行？ |
+|------|---------|-----------|-------------------|------------|
+| 1M | 84 MB | 47 MB | 269 MB | ✅ || 10M | 888 MB | ~470 MB | ~1.2 GB | ❌（1GB cgroup 可行） |
+| 100M | 8.9 GB | ~4.7 GB | ~8 GB | ❌（需磁盘 I/O） |
+
+**结论**：CSR 压缩买入一个数量级的延展（1M→10M 窗口扩大），但 100M 级别仍需 CSR 上磁盘。
+
+**回退方法**：`git reset --hard backup-before-csr-compression`
+
+**后续方向**：
+- P1: 图裁剪 (Graph Pruning, R=12) —— 边数减半，与 varint 叠加可达 3.4x 压缩
+- P2: 10M 规模验证
+- P3: CSR 上磁盘 + I/O 掩盖（参考向量卸载的 1-hop 预取模式）
 
 ---
 
