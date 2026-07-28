@@ -18,9 +18,13 @@
 #include <thread>
 #include <atomic>
 #include <unordered_map>
+#include <iomanip>
 #include <immintrin.h>
 #include <fcntl.h>
 #include <unistd.h>
+
+// thread_local 成员定义
+thread_local std::vector<uint32_t> DiskHNSW::csr_decode_buf_;
 
 // ============================================================
 // 构造函数（原始接口，向后兼容）
@@ -2463,52 +2467,102 @@ void DiskHNSW::buildInMemoryAdjacency() {
     }
 
     uint32_t N = graph_.num_nodes;
-    adj_csr_offsets_.resize(N + 1, 0);
 
-    // 第一步: 计算每个节点的邻居数 (在 new_id 空间)
-    // graph_.adjacency0 使用 old_id, 需要映射
+    // 先构建 new_id 空间的邻接表 (排序后的邻居列表)
+    std::vector<std::vector<uint32_t>> bfs_adj(N);
     for (uint32_t old_id = 0; old_id < N; old_id++) {
         uint32_t new_id = old_to_new_[old_id];
-        adj_csr_offsets_[new_id + 1] = graph_.adjacency0[old_id].size();
-    }
-
-    // 前缀和
-    for (uint32_t i = 0; i < N; i++) {
-        adj_csr_offsets_[i + 1] += adj_csr_offsets_[i];
-    }
-
-    size_t total_edges = adj_csr_offsets_[N];
-    adj_csr_neighbors_.resize(total_edges);
-
-    // 第二步: 填充邻居 (映射到 new_id)
-    // 临时 offset 指针
-    std::vector<uint32_t> write_pos(adj_csr_offsets_.begin(), adj_csr_offsets_.end());
-
-    for (uint32_t old_id = 0; old_id < N; old_id++) {
-        uint32_t new_id = old_to_new_[old_id];
+        bfs_adj[new_id].reserve(graph_.adjacency0[old_id].size());
         for (uint32_t old_neighbor : graph_.adjacency0[old_id]) {
-            uint32_t new_neighbor = old_to_new_[old_neighbor];
-            adj_csr_neighbors_[write_pos[new_id]++] = new_neighbor;
+            bfs_adj[new_id].push_back(old_to_new_[old_neighbor]);
+        }
+        std::sort(bfs_adj[new_id].begin(), bfs_adj[new_id].end());
+    }
+
+    // 统计
+    size_t total_edges = 0;
+    for (auto& nbrs : bfs_adj) total_edges += nbrs.size();
+
+    // 构建 Delta+Varint 压缩 CSR
+    adj_csr_compact_.clear();
+    adj_csr_compact_.reserve(total_edges * 2);  // 预估 (平均 < 2 bytes/delta)
+    adj_csr_byte_offsets_.resize(N + 1, 0);
+
+    uint8_t buf[5];
+    for (uint32_t i = 0; i < N; i++) {
+        adj_csr_byte_offsets_[i] = (uint32_t)adj_csr_compact_.size();
+        uint32_t prev = 0;
+        for (uint32_t nid : bfs_adj[i]) {
+            uint32_t delta = nid - prev;
+            size_t n = varint_encode(delta, buf);
+            adj_csr_compact_.insert(adj_csr_compact_.end(), buf, buf + n);
+            prev = nid;
         }
     }
+    adj_csr_byte_offsets_[N] = (uint32_t)adj_csr_compact_.size();
 
+    // 同时构建 offset 表 (保留旧格式用于快速度数查询)
+    // 但不再存储 neighbors 数组
+    adj_csr_offsets_.resize(N + 1, 0);
+    for (uint32_t i = 0; i < N; i++) {
+        adj_csr_offsets_[i + 1] = adj_csr_offsets_[i] + (uint32_t)bfs_adj[i].size();
+    }
+    // adj_csr_neighbors_ 不再填充 (省内存)
+
+    csr_compressed_ = true;
     has_inmem_adjacency_ = true;
 
-    // 释放原始邻接表内存 (CSR 已包含所有信息)
+    // 释放原始邻接表内存
     graph_.adjacency0.clear();
     graph_.adjacency0.shrink_to_fit();
+    bfs_adj.clear();
+    bfs_adj.shrink_to_fit();
 
-    size_t adj_mb = (total_edges * 4 + (N + 1) * 4) / (1024 * 1024);
-    std::cout << "  [CSR] Built in-memory adjacency: " << total_edges << " edges, "
-              << adj_mb << " MB" << std::endl;
+    size_t compact_mb = adj_csr_compact_.size() / (1024.0 * 1024);
+    size_t offset_mb = (N + 1) * 4 / (1024.0 * 1024);
+    size_t raw_mb = (total_edges * 4 + (N + 1) * 4) / (1024.0 * 1024);
+    std::cout << "  [CSR] Built compressed adjacency: " << total_edges << " edges, "
+              << "compact=" << compact_mb << "MB + offsets=" << offset_mb
+              << "MB = " << (compact_mb + offset_mb) << "MB"
+              << " (raw would be " << raw_mb << "MB, "
+              << std::fixed << std::setprecision(1) << (double)raw_mb / (compact_mb + offset_mb)
+              << "x compression)" << std::endl;
 }
 
-// 从内存 CSR 邻接表获取邻居
-const uint32_t* DiskHNSW::getInMemNeighbors(uint32_t new_id, uint32_t& out_count) const {
+// 解码单个节点的压缩 CSR 邻居列表到 csr_decode_buf_
+// 返回解码的邻居数量
+uint32_t DiskHNSW::decodeCsrNeighbors(uint32_t new_id) {
+    uint32_t byte_start = adj_csr_byte_offsets_[new_id];
+    uint32_t byte_end = adj_csr_byte_offsets_[new_id + 1];
+    size_t available = byte_end - byte_start;
+    const uint8_t* p = adj_csr_compact_.data() + byte_start;
+
+    csr_decode_buf_.clear();
+    uint32_t prev = 0;
+    while (available > 0) {
+        uint32_t delta;
+        size_t n = varint_decode(p, available, delta);
+        if (n == 0) break;
+        prev += delta;
+        csr_decode_buf_.push_back(prev);
+        p += n;
+        available -= n;
+    }
+    return (uint32_t)csr_decode_buf_.size();
+}
+
+// 从内存 CSR 邻接表获取邻居 (new_id 空间)
+const uint32_t* DiskHNSW::getInMemNeighbors(uint32_t new_id, uint32_t& out_count) {
     if (!has_inmem_adjacency_ || new_id >= graph_.num_nodes) {
         out_count = 0;
         return nullptr;
     }
+    if (csr_compressed_) {
+        // 解码 delta+varint 到 thread_local buffer
+        out_count = decodeCsrNeighbors(new_id);
+        return out_count > 0 ? csr_decode_buf_.data() : nullptr;
+    }
+    // 旧路径 (未压缩)
     uint32_t start = adj_csr_offsets_[new_id];
     uint32_t end = adj_csr_offsets_[new_id + 1];
     out_count = end - start;

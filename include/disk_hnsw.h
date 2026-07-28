@@ -227,6 +227,19 @@ private:
     std::vector<uint32_t> adj_csr_neighbors_; // size = total_edges
     bool has_inmem_adjacency_ = false;
 
+    // ---- CSR Delta+Varint 压缩 ----
+    // 邻居列表存为 delta+varint 压缩字节流, 节省 ~40% 内存
+    // adj_csr_compact_: 压缩后的字节流
+    // adj_csr_byte_offsets_: 每个节点的邻居列表在字节流中的起始偏移 (N+1)
+    // 解码时: 从 byte_offsets_[nid] 开始读 varint delta, 还原排序后的邻居 ID
+    std::vector<uint8_t> adj_csr_compact_;        // 压缩字节流
+    std::vector<uint32_t> adj_csr_byte_offsets_;   // 字节偏移 (N+1)
+    bool csr_compressed_ = false;
+
+    // 解码 buffer (thread_local, 避免频繁分配)
+    // getInMemNeighbors 解码到这里, 返回指针
+    static thread_local std::vector<uint32_t> csr_decode_buf_;
+
     // ---- BlockCache（new_id空间）----
     std::unique_ptr<BlockCache> cache_;
     size_t cache_slots_ = 0;
@@ -315,5 +328,10 @@ private:
 
     // 从内存 CSR 邻接表获取邻居 (new_id 空间)
     // 返回 nullptr + out_count=0 如果没有内存邻接表
-    const uint32_t* getInMemNeighbors(uint32_t new_id, uint32_t& out_count) const;
+    // 注意: 压缩模式下返回 thread_local buffer 指针, 调用方用完前不能再调
+    const uint32_t* getInMemNeighbors(uint32_t new_id, uint32_t& out_count);
+
+    // 解码单个节点的压缩 CSR 邻居列表到 buffer
+    // 返回解码的邻居数量, neighbors 指向 csr_decode_buf_
+    uint32_t decodeCsrNeighbors(uint32_t new_id);
 };
