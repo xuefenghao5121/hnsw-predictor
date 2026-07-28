@@ -9,7 +9,7 @@
 
 DiskHNSW 的核心思路：
 
-1. **图结构常驻内存**（上层节点向量 + L0 邻接表 CSR，~120MB），保证贪心下降和图遍历零 I/O
+1. **图结构常驻内存**（上层节点向量 + L0 邻接表 CSR，~272MB），保证贪心下降和图遍历零 I/O
 2. **向量数据存磁盘**，按 BFS 重排后分块，利用空间局部性
 3. **PQ 粗筛**：用 Product Quantization 近似距离做图搜索，无需读磁盘向量
 4. **精确精排**（Fine Rerank）：对 PQ 粗筛的候选集，按 4KB 页粒度读取向量做精确 L2 距离
@@ -19,26 +19,29 @@ DiskHNSW 的核心思路：
 
 ```
 QPS: 53 → 595 → 867 → 2141 → 2643 → 2780    (52x 提升)
+RSS: 337MB → … → 301MB → 269MB   (CSR 压缩后↓ 32MB)
 ```
 
-| 里程碑 | QPS | Recall | 技术 |
-|--------|-----|--------|------|
-| 基线 | 53 | 95.7% | 64KB 块同步读 |
-| FINE_RERANK | 867 | 95.7% | 4KB 页粒度精排，I/O 减 16x |
-| FINE_BUFFERED | 2141 | 95.7% | page cache 热区零 I/O |
-| SIMD PQ LUT | 2643 | 95.7% | AVX2 距离表预计算 |
-| SW 预取 | 2780 | 95.7% | 间接寻址 pipeline 预取 |
-| 4线程并发 | 5808 | 95.7% | pread 多线程 + thread_local PQ table |
+| 里程碑 | QPS | Recall | RSS | 技术 |
+|--------|-----|--------|-----|------|
+| 基线 | 53 | 95.7% | 337MB | 64KB 块同步读 |
+| FINE_RERANK | 867 | 95.7% | 337MB | 4KB 页粒度精排，I/O 减 16x |
+| FINE_BUFFERED | 2141 | 95.7% | 337MB | page cache 热区零 I/O |
+| SIMD PQ LUT | 2643 | 95.7% | 337MB | AVX2 距离表预计算 |
+| SW 预取 | 2780 | 95.7% | 337MB | 间接寻址 pipeline 预取 |
+| **CSR Delta+Varint (P0)** | **2092** | **95.7%** | **269MB** | 邻接表 varint 压缩 1.8x |
+| **FINE_RERANK bug 修复 (P0.5)** | 2067 | 95.7% | 269MB | 双路由表分离，不再依赖隐式对齐 |
+| 4线程并发 | **5808** | 95.7% | 286MB | pread 多线程 + thread_local PQ table |
 
 ### 对比 hnswlib
 
-| 指标 | hnswlib (全内存) | DiskHNSW (512MB cgroup) |
+| 指标 | hnswlib（全内存） | DiskHNSW（512MB cgroup） |
 |------|-----------------|------------------------|
-| Recall | 95.25% | **95.70%** (反超) |
+| Recall | 95.25% | **95.70%**（反超） |
 | QPS (1T) | 12420 | 2780 |
 | QPS (4T) | — | **5808** |
-| RSS | 726MB (OOM@512MB) | **302MB** |
-| 内存节省 | — | **2.4x** |
+| RSS | 726MB（OOM@512MB） | **269MB** |
+| 内存节省 | — | **2.7x** |
 
 ---
 
@@ -563,6 +566,181 @@ hnsw-predictor/
 
 ---
 
+### P0.5: FINE_RERANK 隐藏 Bug 修复 (2026-07-28)
+
+**背景**：P1 图裁剪实验中，任何图裁剪（甚至零裁剪往返：load+save 不改任何边）都会让 recall 从 95.70% 崩到 ~10%。经过隔离测试（PQ-only 95.70%、纯 block cache 95.30%），定位到 bug 在 FINE_RERANK 精排路径。
+
+**根因**：
+- 系统里有两套块文件：`blocks_64k.bin`（含邻接表，8651 块）和 `vecblocks_64k.bin`（仅向量，7937 块）
+- 两文件因元数据大小不同，**同一个 node 在两文件里的 block_id 不一样**
+- FINE_RERANK 代码用**blocks 文件的 route_table**（node → 8651-块 block_id）去索引 **vecblocks 文件的偏移**：
+  ```cpp
+  uint32_t b = route_table_[nid];   // ← blocks 文件的 block_id
+  uint64_t off = 4096 + b * vec_block_size_
+               + block_data_offset_[b]  // ← vecblocks 文件的偏移表
+               + node_slot_table_[nid] * dim * 4;
+  ```
+  用错误的 block_id 索引 vecblocks 数据，读到的是完全不相关的向量
+- **为什么之前跑通了**：原始数据文件的 block 结构碰巧让部分 offset 命中真实向量；重新跑 pipeline 后 block 边界移动，bug 暴露
+
+**修复**（`disk_hnsw.h` + `disk_hnsw.cpp`）：
+1. 新增 `vec_route_table_`（node → vecblocks_block_id），在 `buildFineRerank()` 扫描每个 vecblocks 块时构建
+2. FINE_RERANK 精排路径用 `vec_route_table_` 计算 vecblocks 偏移，用原 `route_table_` 查 block cache
+
+```cpp
+uint32_t b = vec_route_table_[nid];                  // ← 修复: vecblocks 专属
+uint32_t b_cache = route_table_[nid];                 // ← blocks 文件路由（查 cache 用）
+if (auto* cb = cache_->getCachedBlockById(b_cache)) ...
+uint64_t off = 4096 + b * vec_block_size_
+             + block_data_offset_[b]
+             + node_slot_table_[nid] * dim * 4;
+```
+
+**效果**：修复后原图 recall 恢复到 95.70%，图裁剪路径可以正常验证。
+
+**代价**：`vec_route_table_` 增加 4MB 常驻内存（1M 节点 × 4 字节）；总常驻内存 269MB → 273MB（可忽略）。
+
+**教训**：
+- 依赖"多套配套文件的隐式 block_id 对齐"是脆弱设计——任何数据 pipeline 变更都可能触发
+- 类似的"隐式对齐依赖" bug 在 vector search 系统里极其常见（PQ codes 顺序、GT 顺序、block 顺序），需要**每套映射都显式建立而非复用**
+
+---
+
+### P1: 图裁剪验证 —— 负结果 (2026-07-28)
+
+**动机**：CSR 压缩后仍有 47MB 常驻，图裁剪能进一步减边+减内存。目标：边数 -30%，recall 保持 >95%。
+
+**做法**：`src/pipeline/prune_graph.cpp` 实现两种裁剪策略：
+1. **Degree Cap**：简单截断度数到 R_max
+2. **MRNG (Monotonic Relative Neighborhood Graph)**：DiskANN Vamana 用的启发式，保留角度分散的邻居
+
+**结果** (SIFT1M, 512MB cgroup, 修复 FINE_RERANK bug 之后)：
+
+| 配置 | Edges | 减边 | CSR 内存 | Recall | QPS | RSS(cgroup total) |
+|------|-------|------|---------|--------|-----|-----|
+| 原图 (baseline) | 21.2M | 0% | 47MB | **95.70%** | 2067 | 269MB |
+| MRNG R_max=28 | 19.6M | -7.4% | 44MB | 95.50% | 2117 | 348MB ⚠️ |
+| MRNG R_max=24 | 18.0M | -15.2% | 40MB | 94.75% | 2144 | 333MB ⚠️ |
+| MRNG R_max=20 | 16.2M | -23.6% | 36MB | 94.05% | 2197 | 316MB ⚠️ |
+| MRNG R_max=16 | 14.1M | -33.5% | 34MB | 93.10% | 2187 | 298MB ⚠️ |
+
+**观察 1：Recall 掉得比预期快**
+
+即使 R_max=28（只裁 7.4% 边）也掉 0.2pp。MRNG 保留角度分散的邻居，但 SIFT 数据集的 HNSW 图已经很紧凑（avg degree 21），裁剪立即触及 recall。
+
+**观察 2：RSS 反常上涨 30-80MB**
+
+更小的图 → 搜索路径更局部化 → 反复访问相同的 vecblocks 页 → **OS page cache 保留更多热页** → cgroup 记账的 file 部分上涨。这不是坏事（page cache 是共享资源，无成本），但说明**内存瓶颈不在 CSR**。
+
+**观察 3：QPS 仅微涨**
+
+MRNG R=20 只提升 QPS 6.3%（2067→2197），因为 QPS 瓶颈不在图遍历（PQ+SIMD 已经很快），而在 flat_vec_cache 和 page cache 的命中路径。
+
+**Page Cache 分析（关键洞察）**：
+
+用 `mincore` 检查 vecblocks 496MB 文件的 page cache 覆盖率：
+
+```
+vecblocks 在 OS page cache: 100.0% (496.1 MB)
+cgroup memory.stat file: 0-238MB (取决于是否首次读入)
+```
+
+- **系统充足内存下**：vecblocks 全部在宿主机 page cache，cgroup 里 file=0（不计入首次读入这个 cgroup 的），我们"白嫖"到了 500MB 的隐形缓存
+- **冷启动 512MB 严格限制**：cgroup 首次读会计入 file，稳态 file~200MB + anon 269MB ≈ 470MB，**QPS 完全不变**（2093 vs 热态 2067）
+- **说明**：即使真的把 vecblocks 从 page cache 驱逐大部分，flat_vec_cache 已经兜住核心搜索路径
+
+**结论**：
+
+1. **在 1M 规模 + 512MB cgroup 下，图裁剪不产生净收益**：
+   - Recall 掉得多 > QPS 涨得少
+   - CSR 内存已经不是瓶颈（page cache 才是内存去向）
+   - 512MB 预算下当前设计 269MB 常驻 + 500MB page cache（宿主机层面）
+
+2. **图裁剪的真正价值场景在 100M+**：
+   - 100M 边 = 8.9GB CSR，即使 varint 压缩后 4.7GB，容不下
+   - 100M 时必须靠图裁剪减到 40-50% 边数才能常驻
+   - 但届时的 recall 掉幅会比 1M 小（图更冗余，MRNG 更有裁剪空间）
+
+3. **P1 阶段结束，不合入主线**：`sift1m_graph_mrng*.bin` 保留在 output/ 供未来 100M 实验参考，主线继续用原图。
+
+**规模推演修正**：
+
+| 规模 | CSR 原始 | CSR varint | CSR varint+MRNG(R=20) | 常驻总计 | 512M | 1G | 2G |
+|------|---------|-----------|----------------------|---------|------|-----|-----|
+| 1M | 84 MB | 47 MB | 36 MB | 269 MB | ✅ | ✅ | ✅ |
+| 10M | 888 MB | ~470 MB | ~360 MB | ~1.1 GB | ❌ | ✅ 待验证 | ✅ |
+| 100M | 8.9 GB | ~4.7 GB | ~3.6 GB | ~7 GB | ❌ | ❌ | ❌（需 CSR 上磁盘） |
+
+---
+
+## 未来方向
+
+P0/P0.5/P1 阶段结束后，1M 规模的优化空间已基本挖尽（95.70% recall / 2780 QPS 1T / 5808 QPS 4T / 269MB RSS）。下一阶段的战略重心转向**规模化**，因为：
+
+- 1M 的向量数据只有 496MB，宿主机 page cache 能装下整个文件，磁盘 I/O 优化的价值被掩盖
+- 真正验证"内存受限磁盘向量搜索"叙事的战场在 10M / 100M：vecblocks 5GB / 50GB **必然**装不进 page cache，冷 I/O 成为主导
+- 届时 hnswlib 会直接 OOM（10M 需 ~7GB，100M 需 ~70GB），我们的对比才有杀伤力
+
+### P2: 10M 规模验证 (下一步)
+
+**目标**：SIFT10M / DEEP10M，1GB cgroup，recall ≥ 95%，QPS > 500 单线程。
+
+**关键挑战**：
+1. **CSR 内存**：10M × 21 edges × varint ≈ 470MB，加 route/slot/PQ codes 常驻总量约 1.1GB。需要 1GB→1.5GB cgroup，或启用 MRNG 裁剪到 ~360MB
+2. **flat_vec_cache 覆盖率降至 1%**（64MB 只能装 130K 个上层向量），page cache 变成主要热区
+3. **冷启动测试变得重要**：5GB vecblocks 装不进 1GB 预算，首次查询延迟会有真实峰值
+
+**验收指标**：
+- Recall@10 ≥ 95%
+- P50/P99 延迟：<5ms / <20ms（冷 I/O 可能顶到 P99）
+- 单线程 QPS > 500
+- vs hnswlib：内存节省 5x+（1GB vs 7GB OOM）
+
+**技术准备**：
+- 已完成：CSR 压缩、FINE_RERANK bug 修复、MRNG 裁剪工具
+- 待完成：10M 数据集下载 + pipeline 全套跑通 + 更大规模的 PQ M（可能升 M=64 保 recall）
+
+### P3: CSR 上磁盘 + I/O 掩盖 (中期)
+
+**动机**：100M 规模下 CSR varint 也要 4.7GB，即使加 MRNG 裁到 3.6GB 也超预算。CSR 必须能上磁盘。
+
+**思路**：
+1. **热点保留**：Layer 1+ (63K 上层节点) 的 CSR 常驻内存（图遍历第一步）
+2. **Layer 0 冷区上磁盘**：按 BFS 顺序打包成 4KB 页，用现成的 io_uring/pread 基础设施读
+3. **1-hop 预取**：搜索到节点 N，遍历邻居时预先异步读取邻居的邻居（模仿向量的 graph-guided prefetch）
+4. **热点 CSR 缓存**：LRU 缓存 ~64MB 热邻接表页
+
+**技术难点**：CSR 是不定长的（varint 编码），4KB 页边界可能切开某个节点的邻居列表。需要设计 page 内 padding 或跨页拼接。
+
+### P4: 分级存储 + 混合 workload (长期)
+
+**动机**：真实生产场景很少是纯查询——常有增量插入、周期性再训 PQ、多租户 QoS。
+
+**方向**：
+1. **多级存储**：hot (RAM) / warm (NVMe SSD) / cold (S3) 三层，按热度自动迁移
+2. **增量索引**：新向量先写内存 delta 段，周期性合并到磁盘主索引（LSM-tree 思路）
+3. **多租户 QoS**：cgroup 内存/IO 隔离 + per-tenant flat_vec_cache 分配
+4. **PQ 自适应重训**：数据漂移检测（新向量的重建 MSE 升高）触发在线 PQ 再训
+
+### P5: 硬件亲和优化 (探索)
+
+1. **NUMA 亲和**：CSR / PQ codes 分布式在多 NUMA 节点，避免远端访存（结合 KUMF SPE 分析）
+2. **SPDK / user-space NVMe**：跳过内核 buffered I/O，直接用 SPDK 打满 NVMe QD32
+3. **GPU 加速 Phase A**：PQ SIMD 查表天然适合 GPU（batch query 场景）
+4. **持久内存 (Intel Optane / CXL)**：把 vecblocks 放 PMEM，访问延迟从 ~10μs (NVMe) 降到 ~300ns
+
+### 设计哲学
+
+贯穿所有阶段的核心思想：
+
+1. **常驻内存 = 图结构 + 压缩向量代理**（CSR + PQ codes），不常驻 = 全量向量
+2. **两阶段搜索**是内存卸载的本质：Phase A 用内存代理粗筛，Phase B 按需 I/O 精排
+3. **每个映射显式建立**，不依赖"多套数据的隐式对齐"（FINE_RERANK bug 教训）
+4. **量化优化 ROI**：每个优化都要问「省了多少内存 / QPS 涨了多少 / recall 掉了多少 / 代码复杂度值不值」
+5. **规模化优先于极致优化**：1M 的 100 QPS 提升不如 100M 能跑起来重要
+
+---
+
 ## 已知限制与注意事项
 
 1. **vecblocks 与 route table 必须配套**：混用不同版本的文件会导致 offset 错误
@@ -571,3 +749,6 @@ hnsw-predictor/
 4. **性能异常先查 CPU 频率**：`grep MHz /proc/cpuinfo`，热保护降频会让所有测量慢 2.5x
 5. **OPQ 旋转对 SIFT 无效**：SIFT 直方图特征各维已均衡，M=32/dsub=4 下 OPQ 重建误差反而更大
 6. **GT 文件有 8B header**：`n_queries(u32) + k(u32)`，读取时需跳过
+7. **blocks 和 vecblocks 的 block_id 不一致**：两个文件包含相同 node 但 block 划分不同（因邻接表占用空间）。每个文件必须用自己的 route 表。FINE_RERANK 代码中 `vec_route_table_` 专用于 vecblocks 定位，不可共用 blocks 的 `route_table_`
+8. **cgroup memory.file 不等于 page cache 使用量**：如果文件首次读入发生在宿主机（而非 cgroup 内），cgroup file 字段不会计入。想得到真实记账需要先 `posix_fadvise(DONTNEED)` 驱逐再在 cgroup 内冒冷启动
+9. **flat_vec_cache 才是真正的热区**：FLAT_VEC_MB=64 已能装 65K 个上层向量，不同于一般直觉，支撑了大部分 QPS（而非 vecblocks 的 page cache）。进一步调大反而限制图结构内存预算
