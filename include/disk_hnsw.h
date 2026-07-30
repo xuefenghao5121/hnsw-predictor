@@ -214,9 +214,7 @@ public:
     // 每 query 预计算 PQ 距离表 [M * ksub], pqDistance 退化为查表 (SIMD 化)
     void buildPqDistTable(const float* query);
 
-    // OPT-002: 获取 query 的 PQ top-1 节点 ID (用于 query 重排序)
-    // 需要 pq_codes_ 已加载; 返回 ADC 距离最小的节点
-    uint32_t getPQTop1(const float* query);
+
 
 private:
     // P3 (DEC-039): 驱逐初始化文件的 page cache
