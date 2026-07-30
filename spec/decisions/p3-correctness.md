@@ -407,3 +407,36 @@ DEEP10M 无显著变化（瓶颈在 I/O 不在计算）。
 
 **教训:** "公平对比基线"应该用相同的 SIMD 级别，而非标量 vs SIMD。
 NDF OPT 路线 "PQ SIMD dsub=4" 的实际收益来自 l2Distance 而非 PQ 距离计算。
+
+## D-053: flat_vec_cache 解耦 + 调参 — 实验否决 (增大无收益) {#DEC-053}
+<!-- ndf: kind=decision date=2026-07-31 affects=SLA-006 source=verified -->
+
+**Context.** 原 flat_vec_cache 预算被 cap 在 `min(cache_slots*block_size, FLAT_VEC_MB)`，
+即 CACHE_MB=128 时 flat cache 不超过 128MB。假设增大 flat cache 能提高 Phase A 精确距离覆盖率。
+
+**改动.** 解耦: flat_vec_cache 预算由 FLAT_VEC_MB 独立控制, 不受 CACHE_MB 限制。
+
+**实验 (SIFT1M 2GB 4T):**
+
+| FLAT_VEC_MB | 覆盖率 | QPS | 变化 |
+|-------------|--------|-----|------|
+| 32 (65K slots) | 6.5% | 6603 | -5% |
+| **64 (130K slots)** | **13%** | **6754** | **baseline** |
+| 128 (260K slots) | 26% | 6515 | -4% |
+| 256 (520K slots) | 52% | 6176 | -9% |
+| 512 (1040K slots) | 100% | 7310 | +8% (噪声?) |
+
+**根因.** flat_vec_cache 是 hash table (node_id % num_slots):
+- 64MB = 130K slots: 热节点集中在少数 slot, L3 cache 命中率高
+- 512MB = 1M slots: 覆盖全部节点, 但 hash table 数组 520MB >> L3 (12MB), 每次 lookup 都是 L3 miss
+- **增大 flat cache 恶化 CPU L3 cache 局部性, 抵消了覆盖率提升**
+
+**Decision.**
+1. 解耦修复保留 (代码正确性, 去除人为 cap)
+2. FLAT_VEC_MB=64 确认为最优配置
+3. "增大 flat_vec_cache" 优化方向否决
+
+**教训.** hash table 大小与 CPU cache 局部性存在 trade-off:
+- 小 hash table → 高 L3 命中但低覆盖率
+- 大 hash table → 高覆盖率但低 L3 命中
+- 对 SIFT1M, 64MB (13% 覆盖) 是最佳平衡点

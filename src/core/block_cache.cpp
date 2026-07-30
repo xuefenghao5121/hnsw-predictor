@@ -133,8 +133,9 @@ BlockCache::BlockCache(const std::string& blocks_path,
     }
 
     // ---- 3. 初始化 Flat Cache ----
-    // 使用与 block cache 相同的内存预算 (cache_slots_ * block_size_)
-    size_t flat_cache_budget = cache_slots_ * block_size_;
+    // flat cache 预算独立于 block cache, 由 FLAT_VEC_MB 直接控制
+    // (之前用 cache_bytes 做 cap, 导致 CACHE_MB 小时 flat cache 被限制)
+    size_t flat_cache_budget = SIZE_MAX;  // 不限制, 由 initFlatCache 内 FLAT_VEC_MB 控制
     initFlatCache(flat_cache_budget);
 }
 
@@ -246,7 +247,7 @@ void BlockCache::initFlatCache(size_t cache_bytes) {
         int mb = std::atoi(env);
         if (mb > 0) vec_max_bytes = (size_t)mb * 1024 * 1024;
     }
-    size_t vec_budget = std::min(cache_bytes, vec_max_bytes);
+    size_t vec_budget = vec_max_bytes;  // 不再受 cache_bytes 限制 (DEC-053)
     size_t vec_entry_size = dim_ * sizeof(float);
     size_t vec_owner_size = sizeof(uint32_t);
     size_t vec_total_per_slot = vec_entry_size + vec_owner_size;
