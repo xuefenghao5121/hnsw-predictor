@@ -43,19 +43,21 @@ struct PQParams {
 };
 
 // ============================================================
-// VisitedList: 简单的访问标记数组（不需要池化，每次搜索创建一个）
+// VisitedList: 位压缩访问标记数组
+// 使用 1 byte/节点 + 版本计数器, 避免每次搜索 memset
+// 内存: N bytes (vs N*4 bytes for uint32_t), 10M 节点 = 10MB vs 40MB
 // ============================================================
 struct VisitedList {
-    std::vector<uint32_t> mass;  // 使用uint32_t作为标记类型
-    uint32_t curV;               // 当前标记值
+    std::vector<uint8_t> mass;  // 1 byte/节点, 存当前版本号
+    uint8_t curV;               // 当前标记值 (1-255)
 
     explicit VisitedList(size_t num_elements)
         : mass(num_elements, 0), curV(1) {}
 
     void reset() {
         curV++;
-        if (curV == 0) {  // 溢出，清空
-            std::fill(mass.begin(), mass.end(), 0);
+        if (curV == 0) {  // 溢出 (256 次搜索后), 清空
+            std::memset(mass.data(), 0, mass.size());
             curV = 1;
         }
     }

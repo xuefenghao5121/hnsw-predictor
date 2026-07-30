@@ -280,6 +280,41 @@ void DiskHNSW::buildPqDistTable(const float* query) {
                 t[k] = _mm_cvtss_f32(h);
             }
         }
+    } else if (dsub == 3) {
+        // SSE: dsub=3 (DEEP10M 96D / M=32) - pad to 4, reuse sub/mul/hadd
+        for (uint32_t m = 0; m < M; m++) {
+            const float* q_sub = query + (size_t)m * 3;
+            const float* cb_m = cb + (size_t)m * ksub * 3;
+            float* t = &pq_dist_table_[(size_t)m * ksub];
+            __m128 qv = _mm_set_ps(0.0f, q_sub[2], q_sub[1], q_sub[0]);
+            // Process 4 centroids at a time for better ILP
+            uint32_t k = 0;
+            for (; k + 4 <= ksub; k += 4) {
+                __m128 c0 = _mm_set_ps(0.0f, cb_m[(k+0)*3+2], cb_m[(k+0)*3+1], cb_m[(k+0)*3]);
+                __m128 c1 = _mm_set_ps(0.0f, cb_m[(k+1)*3+2], cb_m[(k+1)*3+1], cb_m[(k+1)*3]);
+                __m128 c2 = _mm_set_ps(0.0f, cb_m[(k+2)*3+2], cb_m[(k+2)*3+1], cb_m[(k+2)*3]);
+                __m128 c3 = _mm_set_ps(0.0f, cb_m[(k+3)*3+2], cb_m[(k+3)*3+1], cb_m[(k+3)*3]);
+                __m128 d0 = _mm_sub_ps(qv, c0); d0 = _mm_mul_ps(d0, d0);
+                __m128 d1 = _mm_sub_ps(qv, c1); d1 = _mm_mul_ps(d1, d1);
+                __m128 d2 = _mm_sub_ps(qv, c2); d2 = _mm_mul_ps(d2, d2);
+                __m128 d3 = _mm_sub_ps(qv, c3); d3 = _mm_mul_ps(d3, d3);
+                __m128 h0 = _mm_hadd_ps(d0, d1);
+                __m128 h1 = _mm_hadd_ps(d2, d3);
+                __m128 h = _mm_hadd_ps(h0, h1);
+                t[k]   = _mm_cvtss_f32(h);
+                t[k+1] = _mm_cvtss_f32(_mm_shuffle_ps(h, h, 0x55));
+                t[k+2] = _mm_cvtss_f32(_mm_shuffle_ps(h, h, 0xAA));
+                t[k+3] = _mm_cvtss_f32(_mm_shuffle_ps(h, h, 0xFF));
+            }
+            for (; k < ksub; k++) {
+                __m128 c = _mm_set_ps(0.0f, cb_m[k*3+2], cb_m[k*3+1], cb_m[k*3]);
+                __m128 d = _mm_sub_ps(qv, c);
+                __m128 sq = _mm_mul_ps(d, d);
+                __m128 h = _mm_hadd_ps(sq, sq);
+                h = _mm_hadd_ps(h, h);
+                t[k] = _mm_cvtss_f32(h);
+            }
+        }
     } else {
         for (uint32_t m = 0; m < M; m++) {
             const float* q_sub = query + (size_t)m * dsub;
@@ -308,16 +343,32 @@ float DiskHNSW::pqDistance(const float* query, uint32_t node_id_new) const {
         const uint32_t M = pq_params_.M;
         const uint32_t ksub = pq_params_.ksub;
         const float* t = pq_dist_table_.data();
-        float s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        // AVX2 gather: 8 lookups per iteration (M=32 -> 4 iterations)
+        __m256 acc = _mm256_setzero_ps();
         uint32_t m = 0;
-        for (; m + 4 <= M; m += 4) {
-            s0 += t[(size_t)(m + 0) * ksub + code[m + 0]];
-            s1 += t[(size_t)(m + 1) * ksub + code[m + 1]];
-            s2 += t[(size_t)(m + 2) * ksub + code[m + 2]];
-            s3 += t[(size_t)(m + 3) * ksub + code[m + 3]];
+        for (; m + 8 <= M; m += 8) {
+            __m256i idx = _mm256_set_epi32(
+                (int)((size_t)(m+7)*ksub + code[m+7]),
+                (int)((size_t)(m+6)*ksub + code[m+6]),
+                (int)((size_t)(m+5)*ksub + code[m+5]),
+                (int)((size_t)(m+4)*ksub + code[m+4]),
+                (int)((size_t)(m+3)*ksub + code[m+3]),
+                (int)((size_t)(m+2)*ksub + code[m+2]),
+                (int)((size_t)(m+1)*ksub + code[m+1]),
+                (int)((size_t)(m+0)*ksub + code[m+0])
+            );
+            __m256 v = _mm256_i32gather_ps(t, idx, 4);
+            acc = _mm256_add_ps(acc, v);
         }
-        for (; m < M; m++) s0 += t[(size_t)m * ksub + code[m]];
-        return (s0 + s1) + (s2 + s3);
+        // Horizontal sum
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        __m128 s4 = _mm_add_ps(lo, hi);
+        s4 = _mm_hadd_ps(s4, s4);
+        s4 = _mm_hadd_ps(s4, s4);
+        float total = _mm_cvtss_f32(s4);
+        for (; m < M; m++) total += t[(size_t)m * ksub + code[m]];
+        return total;
     }
 
     // ADC fallback: 直接计算
