@@ -126,8 +126,12 @@ DiskHNSW 的设计意图是**从 1M 验证走向 100M 生产**：
 
 ## 设计约束 {#CHR-004}
 <!-- ndf: kind=constraint level=must layer=L0 status=stable since=0.1 source=observed -->
+<!-- updated=2026-07-30: DEC-044 双维度 SLA -->
 
 1. 常驻内存 MUST ≤ cgroup MemoryMax(典型 512MB)
-2. 搜索召回率 MUST ≥ 95% (Recall@10 on SIFT1M)
+2. 搜索召回率 MUST ≥ 95% (Recall@10)
 3. 所有数据准备步骤 MUST 用同一套 base 数据(graph/PQ/GT 共享 node id 空间)
 4. vecblocks 与 route table MUST 配套生成,不可跨版本混用
+5. **双维度性能 (DEC-044)**: 
+   - 内存受限时: DiskHNSW MUST 显著优于 hnswlib (已验证 ✅, 10x@512MB)
+   - 全量放开时: DiskHNSW SHOULD 达到 hnswlib 70%+ QPS (当前 21%, 待优化 🔴)

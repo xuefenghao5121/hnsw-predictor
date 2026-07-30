@@ -163,3 +163,97 @@
 - 对比 hnswlib 在相同条件下的真实性能 (hnswlib 也需要 page cache)
 
 **决议条件:** 诚实 benchmark 完成后, 基于实测数据重新定义 SLA。
+
+---
+
+## D-043: hnswlib 全量放开对比 — 两阶段搜索的固有开销 {#DEC-043}
+<!-- ndf: kind=decision date=2026-07-30 affects=CHR-003,CHR-004,SLA-006 source=verified -->
+
+**Context.** 之前只对比了"内存受限时谁能动"。新增全量放开 (2GB cgroup) 下与 hnswlib 的直接性能对比。
+
+**实测数据 (SIFT1M, 2GB cgroup, drop_caches):**
+
+| 配置 | hnswlib | DiskHNSW | 差距 |
+|------|---------|----------|------|
+| 1T ef=50 | 0.09ms QPS 11565 | 0.40ms QPS 2492 | **4.6x** |
+| 4T ef=50 | QPS 11673 | QPS 5693 | 2.1x |
+| hnswlib ef=100 | 0.16ms QPS 6392 (recall 98.3%) | - | 不可比 |
+
+**DiskHNSW 0.40ms 时间分解 (PROFILE_TS + PROFILE_FINE):**
+
+```
+PhaseA (PQ 粗筛):    230μs (57%)  ← hnswlib 无此步骤
+Fine Rerank:        190μs (38%)  ← hnswlib 无此步骤
+  pread I/O:         189μs (page cache 命中, 非磁盘)
+  L2 compute:         41μs
+其他:                ~20μs (5%)
+```
+
+**Decision.**
+
+1. **根因确认**: 4.6x 差距来自两阶段搜索的固有架构开销 — PQ 粗筛 + Fine Rerank 做了两遍距离计算, hnswlib 在一个 pass 里完成
+2. **不是 I/O 问题**: 全量放开下 Fine Rerank 的 pread 全命中 page cache (189μs 是系统调用开销, 非磁盘)
+3. **不是 PQ 精度问题**: recall 95.70% vs hnswlib 95.25%, PQ 粗筛精度足够
+4. **是架构问题**: 两阶段分离导致重复遍历和额外计算
+
+**影响:** SLA-006 新增全量放开目标, 要求优化到 hnswlib 70%+ QPS。
+
+## D-044: 双维度 SLA — 内存受限 + 全量放开 {#DEC-044}
+<!-- ndf: kind=decision date=2026-07-30 affects=CHR-003,CHR-004 source=verified -->
+
+**Context.** 之前 SLA 只考虑内存受限场景。用户明确要求: "目标性能场景不止是 cgroup 限制下的 hnswlib, 还有全量放开下的 hnswlib"。
+
+**Decision.** DiskHNSW 的 SLA MUST 同时满足两个维度:
+
+### 维度 1: 内存受限 (已验证 ✅)
+
+在 cgroup 限制 < hnswlib 需求时, DiskHNSW MUST 显著优于 hnswlib:
+
+| 场景 | cgroup | DiskHNSW | hnswlib | 胜出 |
+|------|--------|----------|---------|------|
+| SIFT1M | 512MB | QPS 5247 | QPS 527 | **10x** |
+| DEEP10M | 2GB | QPS 1762 | OOM | ∞ |
+| DEEP10M 紧凑 | 1.5GB | QPS 327 | OOM | ∞ |
+
+### 维度 2: 全量放开 (待优化 🔴)
+
+在内存充裕时, DiskHNSW SHOULD 达到 hnswlib 70%+ QPS:
+
+| 场景 | 当前 | 目标 | 差距 |
+|------|------|------|------|
+| SIFT1M 1T | 2492 (hnswlib 21%) | ≥ 8000 (70%+) | 需 3.2x |
+| SIFT1M 4T | 5693 (hnswlib 49%) | ≥ 8000 (70%+) | 需 1.4x |
+
+**rationale:** DiskHNSW 不能是"退而求其次"的方案。如果内存充裕时慢 5x,
+用户没有理由选择它。70% 是"可接受的性能折衷"阈值 — 用 2x 内存节省换 30% 性能。
+
+## D-045: 两阶段融合优化方向 {#DEC-045}
+<!-- ndf: kind=decision date=2026-07-30 affects=SLA-006,Q-006 source=deduced -->
+
+**Context.** DEC-043 确认 4.6x 差距来自两阶段分离。需要规划如何缩小差距。
+
+**Decision.** 按以下优先级推进优化:
+
+### 🔴 P1: PhaseA + FineRerank 融合 (预期 -40%)
+**思路**: 边遍历边精排, 共享 candidate set, 消除重复遍历
+```
+当前: PhaseA(遍历100节点PQ) → 输出100候选 → FineRerank(100候选精确L2)
+融合: 遍历中 → cache命中用精确L2 / miss用PQ → 到达ef时已精排完毕
+```
+本质: PQ_HYBRID 模式的极致版 — 尽可能用精确距离, miss 时 fallback PQ
+
+### 🟡 P2: PQ SIMD 优化 (预期 -15%)
+SIFT1M dsub=4 可用 AVX2 LUT, 当前实现未充分利用
+
+### 🟡 P3: Fine Rerank 批量 pread (预期 -20%)
+合并相邻 4KB 页为单次 8-16KB pread, 减少系统调用
+
+### 🟢 P4: flat_vec_cache 增大 (预期 -10%)
+32MB → 64MB, 更多候选命中缓存
+
+### 合计预期: 0.40ms → 0.20ms, QPS 2492 → 5000+
+
+**alternatives rejected:**
+- 纯 O_DIRECT (绕过 page cache): 全量放开下 I/O 非瓶颈, 无收益
+- 增大 PQ 码本 (M=64): 内存翻倍, 收益不确定
+- 放弃 PQ 粗筛全量加载: 违背内存受限设计目标
