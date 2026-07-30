@@ -69,7 +69,10 @@ DiskHNSW 的设计意图是**从 1M 验证走向 100M 生产**：
   hnswlib 需 ~6GB OOM@2GB，DiskHNSW 3.7x 内存节省。
   瓶颈从 I/O 转移到 PQ 计算 (80%)，VisitedList 优化带来 2x QPS。
   1GB cgroup 物理不可行 (核心数据 1.3GB)，最小可行 1.8GB。
-- **P3（构想）**：100M 规模--CSR varint 4.7GB 也需上磁盘，引入 CSR 分页 + 1-hop 预取
+- **P3（规范设计中, 2026-07-30）**：100M 规模。CSR varint 4.9GB + PQ codes 3.2GB + upper vecs 2.4GB = 11.3GB 核心数据。
+  P3 核心是**把图结构从内存卸载到磁盘**--CSR 分页加载 + 1-hop 预取 + PQ codes mmap + 上层向量 PQ 编码。
+  目标: 4GB cgroup, recall≥95%, QPS>100 (1T) / >500 (12T)。
+  详见 [[P3-INTENT-001]] 及 `spec/open/p3-spec.md`。
 - **P4-P5（探索性构想）**：分级存储、硬件亲和（NUMA/SPDK/GPU/PMEM）。这些方向当前
   无代码或设计支撑，仅为探索性路线设想
 
