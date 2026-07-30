@@ -153,9 +153,25 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
 // ============================================================
 
 float DiskHNSW::l2Distance(const float* a, const float* b) const {
-    // 标量 L2 距离计算（不优化，保持与 hnswlib 一致，作为公平对比基线）
-    float result = 0.0f;
-    for (size_t i = 0; i < dim_; i++) {
+    // AVX2 SIMD 优化 (SIFT 128D = 4×__m256, DEEP 96D = 3×__m256)
+    const size_t d = dim_;
+    __m256 acc = _mm256_setzero_ps();
+    size_t i = 0;
+    for (; i + 8 <= d; i += 8) {
+        __m256 av = _mm256_loadu_ps(a + i);
+        __m256 bv = _mm256_loadu_ps(b + i);
+        __m256 diff = _mm256_sub_ps(av, bv);
+        acc = _mm256_fmadd_ps(diff, diff, acc);
+    }
+    // Horizontal sum
+    __m128 lo = _mm256_castps256_ps128(acc);
+    __m128 hi = _mm256_extractf128_ps(acc, 1);
+    __m128 s4 = _mm_add_ps(lo, hi);
+    s4 = _mm_hadd_ps(s4, s4);
+    s4 = _mm_hadd_ps(s4, s4);
+    float result = _mm_cvtss_f32(s4);
+    // Tail
+    for (; i < d; i++) {
         float t = a[i] - b[i];
         result += t * t;
     }
