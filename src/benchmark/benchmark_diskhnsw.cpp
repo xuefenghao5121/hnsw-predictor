@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <set>
 #include <string>
 #include <vector>
@@ -130,6 +131,33 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 1000000; i++) warm_sink += i * 1.1;
     if (warm_sink < 0) std::cerr << "(warmup sink)";
 
+    // OPT-002: Query 重排序 — 按 PQ top-1 节点 ID 排序
+    // BFS 重排保证 ID 相近 = 空间相近, 相邻 query 访问相似区域
+    std::vector<int> query_order(num_query);
+    std::iota(query_order.begin(), query_order.end(), 0);
+
+    const char* sort_env = std::getenv("QUERY_SORT");
+    bool query_sort = sort_env && atoi(sort_env) == 1;
+
+    if (query_sort && pq_path_env && num_query > 1) {
+        std::vector<std::pair<uint32_t, int>> top1_ids(num_query);
+        for (int i = 0; i < num_query; i++) {
+            uint32_t top1 = hnsw->getPQTop1(&query_data[(size_t)i * dim]);
+            top1_ids[i] = {top1, i};
+        }
+        std::sort(top1_ids.begin(), top1_ids.end());
+        for (int i = 0; i < num_query; i++)
+            query_order[i] = top1_ids[i].second;
+        std::cout << "QUERY_SORT=1: reordered " << num_query << " queries" << std::endl;
+
+        std::vector<float> sorted_queries(num_query * dim);
+        for (int i = 0; i < num_query; i++) {
+            int src = query_order[i];
+            std::memcpy(&sorted_queries[(size_t)i * dim], &query_data[(size_t)src * dim], dim * sizeof(float));
+        }
+        query_data = std::move(sorted_queries);
+    }
+
     // Search warmup: run all queries once to warm cache + CPU
     // (also warmup batch mode if batch_size > 0)
     const char* bs_env = std::getenv("BATCH_SIZE");
@@ -207,9 +235,10 @@ int main(int argc, char** argv) {
     size_t correct = 0;
     size_t total = 0;
     for (int i = 0; i < num_query; i++) {
+        int orig = query_order[i];  // results[i] 对应原始 query_order[i]
         std::set<uint64_t> gt_set;
-        for (size_t j = 0; j < gt_data[i].size() && j < (size_t)k; j++)
-            gt_set.insert(gt_data[i][j]);
+        for (size_t j = 0; j < gt_data[orig].size() && j < (size_t)k; j++)
+            gt_set.insert(gt_data[orig][j]);
         size_t found = 0;
         for (const auto& [d, id] : results[i]) {
             if (gt_set.count(id)) found++;
