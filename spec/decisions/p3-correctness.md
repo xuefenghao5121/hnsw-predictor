@@ -257,3 +257,19 @@ SIFT1M dsub=4 可用 AVX2 LUT, 当前实现未充分利用
 - 纯 O_DIRECT (绕过 page cache): 全量放开下 I/O 非瓶颈, 无收益
 - 增大 PQ 码本 (M=64): 内存翻倍, 收益不确定
 - 放弃 PQ 粗筛全量加载: 违背内存受限设计目标
+
+## D-046: CSR cache 增大 — 实验否决 {#DEC-046}
+<!-- ndf: kind=decision date=2026-07-30 affects=OPT-002 source=verified -->
+
+**Context.** 猜想 CSR cache 256MB (覆盖率 46%) 增大到 512MB (覆盖率 92%) 能提高 hit rate。
+
+**实验.** DEEP10M 2GB cgroup, CSR_CACHE_MB=512:
+- hit_rate: 68.4% (与 256MB 完全相同)
+- QPS: 1816 (vs 1762, 仅 +3%)
+- misses: 38687 (与 256MB 完全相同)
+
+**根因.** 200 query 的 unique CSR 工作集 = 38687 pages (151MB), 已在 256MB cache 内。
+剩余 31.6% miss 是每个 query 访问新区域的**固有 cold miss**, 增大 cache 无法解决。
+
+**Decision.** CSR cache 256MB 是最优配置, 不增大。
+如要提高 CSR hit rate, 需改变访问模式 (查询聚类), 而非增大缓存。
