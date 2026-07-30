@@ -273,3 +273,34 @@ SIFT1M dsub=4 可用 AVX2 LUT, 当前实现未充分利用
 
 **Decision.** CSR cache 256MB 是最优配置, 不增大。
 如要提高 CSR hit rate, 需改变访问模式 (查询聚类), 而非增大缓存。
+
+## D-047: P1 批量 pread 合并 — 实验证实 {#DEC-047}
+<!-- ndf: kind=decision date=2026-07-30 affects=OPT-001 source=verified -->
+
+**实验.** Fine Rerank 中 60 个独立 pread(4KB) → 排序合并连续页为 ~10 个 pread(64KB)。
+
+**结果:**
+
+| 场景 | 优化前 | P1 后 | 提升 |
+|------|--------|-------|------|
+| SIFT1M 512MB 4T | 5247 | 6756 | +29% |
+| DEEP10M 2GB 12T | 1762 | 1929 | +9% |
+| DEEP10M 1.5GB 12T | 327 | 805 | +146% |
+
+**Decision.** P1 保留, 默认启用 (FINE_PREAD=1 时自动生效)。
+
+## D-048: P2 query 重排序 — 实验否决 {#DEC-048}
+<!-- ndf: kind=decision date=2026-07-30 affects=OPT-003 source=verified -->
+
+**实验.** 按 PQ top-1 节点 ID 排序 query, BFS 重排保证 ID 相近=空间相近。
+
+**结果:**
+- CSR hit_rate: 68.4% → 68.4% (完全不变)
+- DEEP10M 1.5GB QPS: 805 → 625 (反而降低)
+- 预计算开销: 10M 节点 ADC 扫描 × 200 query ~数十秒
+
+**根因.** 200 query 的工作集 (38687 unique CSR pages = 151MB) 已经在 cache 内。
+排序不会减少 cold miss — 每个 query 仍然要访问自己的新区域。
+预计算开销远超缓存收益。
+
+**Decision.** P2 否决, 保留代码 (QUERY_SORT=1) 但默认关闭。
