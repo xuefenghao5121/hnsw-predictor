@@ -57,3 +57,7 @@ clean:
 	rm -f $(BUILD_DIR)/*
 
 .PHONY: all pipeline bench test clean
+
+# Page Shuffle 工具
+$(BUILD_DIR)/shuffle_vecblocks: src/pipeline/shuffle_vecblocks.cpp $(HEADERS) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -o $@ src/pipeline/shuffle_vecblocks.cpp $(LDFLAGS)

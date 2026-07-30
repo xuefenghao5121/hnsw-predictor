@@ -304,3 +304,50 @@ SIFT1M dsub=4 可用 AVX2 LUT, 当前实现未充分利用
 预计算开销远超缓存收益。
 
 **Decision.** P2 否决, 保留代码 (QUERY_SORT=1) 但默认关闭。
+
+## D-049: Page Shuffle 在 10M 验证 — 实验否决 {#DEC-049}
+<!-- ndf: kind=decision date=2026-07-30 affects=DEC-018 source=verified -->
+
+**Context.** DEC-025 在 SIFT1M 上 Shuffle 收益边际 (+2.1%)。DEC-018 假设 10M 规模
+vecblocks 3.7GB >> page cache, Shuffle 应有更大收益。
+
+**实验.** DEEP10M Page Shuffle (greedy page clustering):
+- 页内邻居对: 27.3% → 79.3% (+190.7%)
+- Shuffle 耗时: 18s (1M nodes/s)
+
+**结果:**
+
+| 场景 | 原始 | Shuffled | 变化 |
+|------|------|----------|------|
+| 2GB cgroup | 1929 QPS | 1879 QPS | **-2.6%** |
+| 1.5GB cgroup | 805 QPS | 581 QPS | **-27.8%** |
+| Recall | 95.15% | 95.15% | 不变 |
+
+**根因.** Shuffle 重排了 vecblocks 内部布局, 虽然提高了页内邻居对 (27%→79%),
+但破坏了 BFS 重排的 block 级局部性:
+1. BFS 保证同 block 内节点空间相近 → block cache 一次读 64KB 覆盖多个 query 的候选
+2. Shuffle 在 block 内部按页重排 → 页级局部性提高, 但跨 block 的访问模式变差
+3. 紧凑模式下 page cache 紧张, 跨 block 访问变差的影响被放大
+
+**Decision.** Page Shuffle 正式否决:
+- 1M 收益边际 (+2.1%), 10M 负收益 (-2.6% ~ -27.8%)
+- BFS block 级重排已足够, 页级 shuffle 破坏而非改善局部性
+- 算法正确 (页内邻居对确实提升), 但性能假设错误 (收益不随规模放大)
+
+## D-050: Page Search 不在 10M 验证 — 逻辑否决 {#DEC-050}
+<!-- ndf: kind=decision date=2026-07-30 affects=DEC-017 source=deduced -->
+
+**Context.** DEC-017 在 SIFT1M 冷态 +2% 收益。DEC-024 结论"10M 是真正验证战场"。
+
+**Decision.** 不在 10M 上实施 Page Search, 逻辑否决:
+
+1. **实现成本高**: 需要 ~40MB block→node_ids 反向映射表 + init 逻辑改动
+2. **收益预期低**: Page Search 的前提是"同页向量有用", 但:
+   - 10M 的 Fine Rerank 候选 (REFINE_EF=300) 已覆盖足够邻居
+   - 页内额外向量大多不在 ef=300 候选集中 → 不会改善 recall
+   - L2 计算开销 (+10 per page × 60 pages × 12 threads) 可能抵消 I/O 节省
+3. **Page Shuffle 已否决**: Page Search 在 Shuffle 后才有意义 (同页向量是图邻居),
+   Shuffle 失败 → Page Search 失去前提条件
+4. **优先级低于**: PhaseA+Fine 融合 (-40%) 和 PQ SIMD (-15%) 收益远大于此
+
+**正式关闭 DEC-017 (Page Search) 和 DEC-018 (Page Shuffle)。**
