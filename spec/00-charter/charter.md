@@ -80,13 +80,16 @@ DiskHNSW MUST 在 cgroup 内存限额(≥512MB)下,使用磁盘驻留向量数�
 ### 维度 2: 全量放开 (待优化 🔴)
 
 > 内存充裕时 SHOULD 达到 hnswlib 70%+ QPS (DEC-044)
+<!-- updated=2026-07-30: DEC-052 AVX2 l2Distance 后数据 -->
 
 | 配置 | 当前 | 目标 | 差距根因 (DEC-043) |
 |------|------|------|-------------------|
-| 1T (2GB cgroup) | QPS 2492 (hnswlib 21%) | ≥ 8000 (70%+) | 两阶段额外开销: PhaseA 57% + Fine 38% |
-| 4T (2GB cgroup) | QPS 5693 (hnswlib 49%) | ≥ 8000 (70%+) | hnswlib 4T 有锁瓶颈 |
+| 1T (2GB cgroup) | QPS 2111 (hnswlib 18%) | ≥ 8000 (70%+) | 两阶段额外开销: PhaseA 57% + Fine 38% |
+| 4T (2GB cgroup) | QPS 7231 (hnswlib 62%) | ≥ 8000 (70%+) | 接近目标, 多线程 scale 更好 |
 
-优化路径 (DEC-045): PhaseA+Fine 融合(-40%) + 批量pread(-20%) + PQ SIMD(-15%) + cache增大(-10%) → 0.40→0.18ms
+优化进展: P1 pread合并(+19%) + AVX2 l2Distance(+16%) → 4T 差距从 1.88x 缩至 **1.62x**。
+下一步: flat_vec_cache 增大 + ef_search 自适应。
+已否决: PhaseA+Fine 融合(DEC-051, inline I/O 无法批量化)。
 
 > rationale: 95% recall 是生产可接受的最低召回率阈值;
 > 2000 QPS 是单线程交互式搜索的可用阈值(<0.5ms 延迟)。

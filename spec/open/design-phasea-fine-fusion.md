@@ -1,8 +1,10 @@
 # DEC-045 P1: PhaseA + Fine Rerank 融合 — 实验否决
 
 > 创建: 2026-07-30
-> 状态: closed (实验否决)
+> 状态: closed (实验否决, DEC-051)
 > 关联: DEC-045, SLA-006
+> 后续: 优化方向转向 AVX2 l2Distance (DEC-052, 已验证 +16%)
+> 下一步: flat_vec_cache 增大 + ef_search 自适应
 
 ---
 
