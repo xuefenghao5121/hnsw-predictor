@@ -309,3 +309,66 @@ benchmark MUST 在 `benchmark_diskhnsw.cpp` 中：
 
 > 实测: 热态 2083 QPS -> 冷态 842 QPS（-60%），I/O 占比 ~60%。
 > 冷态 SLA: QPS ≥ 500（见 [[CON-SLA-010]]）。
+
+## 初始化文件 I/O 路径 {#BEH-017}
+<!-- ndf: kind=req level=must layer=L1 status=stable since=0.5 source=verified -->
+<!-- verified=2026-07-30: DEC-039 pgmajfault 分析 + memory-architecture.md -->
+
+### graph.bin 加载行为
+
+DiskHNSW init MUST 按以下路径加载 graph.bin:
+
+1. `std::ifstream` 打开 (buffered I/O, 走 page cache)
+2. 读 header → levels[] → **seekg() 跳过 L0 向量** → 读上层向量 → labels → 邻接表
+3. 解析为 CSR (delta+varint 压缩)
+4. `posix_fadvise(DONTNEED)` 驱逐所有文件页
+
+**关键行为:**
+- slim 格式只读上层向量 (SIFT1M: 30MB of 587MB, DEEP10M: 228MB of 4.6GB)
+- 邻接表逐节点读取 (uint16 count + edges), 不是 mmap
+- init 完成后 graph.bin 的 page cache MUST 为 0
+
+### blocks_64k.bin I/O 行为
+
+BlockCache MUST 使用 O_DIRECT 打开 blocks_64k.bin:
+
+1. `open(O_RDONLY | O_DIRECT)` — DMA 直传, 不进 page cache
+2. 搜索时 cache miss → pread(block, O_DIRECT) → 真实磁盘 I/O
+3. 读到的数据存入 LRU slot (匿名内存)
+
+**关键约束:**
+- blocks_64k.bin 的 I/O **不消耗 cgroup page cache 预算**
+- O_DIRECT 需要 512B 对齐的 buffer 和 offset
+
+### vecblocks_64k.bin Fine Rerank 行为
+
+Fine Rerank MUST 根据环境变量选择 I/O 方式:
+
+| 环境变量 | I/O 方式 | page cache | 用途 |
+|----------|---------|------------|------|
+| FINE_BUFFERED=1 (默认推荐) | pread (buffered) | ✅ cgroup 计费 | 正常运行 |
+| FINE_DIRECT=1 | pread (O_DIRECT) | ❌ 绕过 | 诊断/诚实测量 |
+| FINE_PREAD=1 | 影响提交方式 (pread vs io_uring) | 同上 | 多线程必须 |
+
+**Fine Rerank 工作集估算:**
+```
+每查询: ~100 候选 (REFINE_EF=100)
+每候选: 1 个 4KB 页 (含多个向量, BFS 重排保证局部性)
+去重后: ~60 unique pages/query (40% 共享)
+200 query: ~12000 unique pages = 48MB 工作集
+```
+
+### PQ codes 加载行为
+
+1. `std::ifstream` 全量读取 (31MB SIFT1M / 304MB DEEP10M)
+2. 存入 `pq_codes_` vector (匿名内存)
+3. `posix_fadvise(DONTNEED)` 驱逐文件页
+
+### 运行时 page cache 组成
+
+运行时 cgroup page cache 由以下组成:
+1. **vecblocks 热页** — Fine Rerank 工作集 (~48MB SIFT1M / ~900MB DEEP10M)
+2. **CSR pages** — CSRCache miss 时的 pread 页 (仅 CSR_ON_DISK=1)
+3. **系统文件页** — 共享库/locale (~5MB)
+
+> 参见 [[CON-MEM-010]] 内存预算约束 和 memory-architecture.md 完整分配表。

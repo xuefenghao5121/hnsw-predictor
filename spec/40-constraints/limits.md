@@ -117,18 +117,69 @@ Dynamic Width 在当前配置（REFINE_EF=100, PQ 粗筛）下无效果。根因
 
 未来方向：如果 REFINE_EF 降到 30-50，或改用精确距离搜索，DW 可能生效。
 
-## 冷 I/O 模式 SLA {#CON-SLA-010}
-<!-- ndf: kind=constraint level=L1 status=draft since=0.3 source=deduced -->
-<!-- refines: DEC-021 -->
+## 内存预算约束 {#CON-MEM-010}
+<!-- ndf: kind=constraint level=must layer=L1 status=stable since=0.5 source=verified -->
+<!-- verified=2026-07-30: DEC-039 诚实 benchmark + pgmajfault 分析 -->
 
-当 `EVICT_PAGE_CACHE=1` 时：
-- Recall SLA 不变（≥ 95%）
-- QPS SLA 放宽为 ≥ 500（冷 I/O 条件下 QPS 自然下降）
-- RSS SLA 不变（≤ 300MB）
+### 稳态 vs 运行时
 
-| 参数 | 默认值 | 环境变量 | 说明 |
-|------|--------|---------|------|
-| Page Cache 驱逐开关 | `0` (关) | `EVICT_PAGE_CACHE` | 1=每次查询后 posix_fadvise(DONTNEED) 驱逐 vecblocks |
+> **cgroup 预算不能只算稳态，MUST 预留 ~100MB 运行时开销。**
 
-> rationale: 冷 I/O 下 Fine Rerank 每页读取 ~10-50μs（vs 热态 ~1μs），
-> QPS 下降是预期行为。QPS ≥ 500 对应 < 2ms/query，仍为交互式可用。
+```
+cgroup MemoryMax ≥ 稳态匿名 + 稳态 page cache + 运行时开销
+                     ↓不可回收        ↓可回收          ↓必须预留
+```
+
+运行时开销来源:
+
+| 开销项 | 大小 | 机制 |
+|--------|------|------|
+| glibc malloc arena | ~8MB/线程 | 每线程 64MB arena, 碎片约 12% |
+| slot table 构建扫描 | ~31MB (SIFT1M) / ~40MB (DEEP10M) | vecblocks 全文件扫描的 file pages |
+| 并发工作集放大 | ~20MB (4T) | 多线程访问不同 query 区域 |
+| 内核 slab | ~15MB | dentry/inode 记账 |
+| 系统文件页 | ~5MB | 共享库/locale等 |
+| **总运行时开销** | **~80-100MB** | |
+
+### cgroup 预算计算公式
+
+```
+所需 cgroup = 匿名内存(稳态) + page cache(稳态) + 100MB(运行时开销)
+```
+
+| 数据集 | 匿名(稳态) | page cache(稳态) | 运行时 | 所需 cgroup |
+|--------|-----------|-----------------|--------|------------|
+| SIFT1M | 234MB | 53MB | 100MB | **387MB** |
+| DEEP10M (CSR_ON_DISK) | 1.1GB | 53MB | 100MB | **1.25GB** |
+| DEEP10M (含 CSR cache 256MB) | 1.1GB | 900MB | 100MB | **2.1GB** |
+
+### 验证实证 (pgmajfault 监控)
+
+| cgroup | 运行时需求 | cgroup 限制 | pgmajfault | QPS影响 |
+|--------|-----------|-----------|------------|--------|
+| SIFT1M 512MB | ~398MB | 512MB | 10 | 无影响 |
+| SIFT1M 384MB | ~398MB | 384MB | 5523 | -43% |
+| SIFT1M 256MB | ~398MB | 256MB | 边界 | -92% |
+
+> 当 cgroup < 运行时需求时, 内核频繁回收 page cache (pgmajfault 激增),
+> 导致 Fine Rerank pread 变成真实磁盘 I/O。
+
+### 文件 I/O 路径约束
+
+| 文件 | I/O 方式 | 运行时角色 | page cache |
+|------|---------|-----------|------------|
+| graph.bin | ifstream (buffered) → fadvise(DONTNEED) | init 解析为 CSR | init 后驱逐 |
+| blocks_64k.bin | **O_DIRECT** | BlockCache 按需 | **不进 page cache** |
+| vecblocks_64k.bin | pread (buffered, FINE_BUFFERED=1) | Fine Rerank | cgroup 计费 |
+| PQ codes | ifstream → fadvise(DONTNEED) | init 加载到内存 | init 后驱逐 |
+| CSR pages (/tmp) | pread (buffered) → CSRCache LRU | 运行时按需 | cgroup 计费 |
+
+### posix_fadvise(DONTNEED) 强制规则
+
+以下文件在 init 加载完成后 MUST 调用 `posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED)`:
+1. graph.bin (587MB SIFT1M / 4.6GB DEEP10M) — 解析为 CSR 后不需要文件页
+2. PQ codes file (31MB / 304MB) — 加载到 pq_codes_ 后不需要
+3. bfs.bin (7.7MB / 76MB) — 加载到映射表后不需要
+
+> rationale: 这些文件在 init 后不再访问，但其 page cache 会占用 cgroup 额度，
+> 挤压 vecblocks/CSR 热数据的 page cache 预算。

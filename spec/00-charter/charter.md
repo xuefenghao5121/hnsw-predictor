@@ -66,14 +66,16 @@ DiskHNSW 对 SIFT1M(128 维,100 万向量)MUST 达成以下指标:
 DiskHNSW 的设计意图是**从 1M 验证走向 100M 生产**：
 
 - **P0-P1（已完成 ✅）**：1M 规模下验证内存卸载 + 压缩 + 图裁剪的可行性与边界
-- **P2（已完成 ✅, 2026-07-30）**：10M 规模验证。DEEP10M 95.15% recall / 2340 QPS (12T) / 2GB cgroup。
-  hnswlib 需 ~6GB OOM@2GB，DiskHNSW 3.7x 内存节省。
-  瓶颈从 I/O 转移到 PQ 计算 (80%)，VisitedList 优化带来 2x QPS。
-  1GB cgroup 物理不可行 (核心数据 1.3GB)，最小可行 1.8GB。
-- **P3（规范设计中, 2026-07-30）**：100M 规模。CSR varint 4.9GB + PQ codes 3.2GB + upper vecs 2.4GB = 11.3GB 核心数据。
-  P3 核心是**把图结构从内存卸载到磁盘**--CSR 分页加载 + 1-hop 预取 + PQ codes mmap + 上层向量 PQ 编码。
-  目标: 4GB cgroup, recall≥95%, QPS>100 (1T) / >500 (12T)。
-  详见 [[P3-INTENT-001]] 及 `spec/open/p3-spec.md`。
+- **P2（已完成 ✅, 2026-07-30）**：10M 规模验证。DEEP10M 95.15% recall / **1762 QPS** (12T, drop_caches 诚实测量) / 2GB cgroup。
+  hnswlib 需 ~6GB OOM@2GB，DiskHNSW 在 hnswlib 无法运行的内存配置下仍可用。
+  ⚠️ DEC-039: 之前 QPS 2340 不诚实（page cache 白嫖），诚实测量 1762 (-25%)。
+  1.5GB cgroup 下从 1895 降到 327 (-83%)，~1.5GB 是性能悬崖。
+  瓶颈从 PQ 计算转移到磁盘 I/O（真实部署），VisitedList 优化在开发机有效但真实部署收益缩水。
+- **P3（实现中, 2026-07-30）**：CSR 分页加载已实现。
+  CSR 上磁盘 + CSRCache LRU 分页缓存, 节省 553MB 匿名内存 (DEEP10M)。
+  初始化后 posix_fadvise(DONTNEED) 驱逐 graph/PQ/bfs 文件页。
+  诚实 benchmark (drop_caches) 已验证 SIFT1M 和 DEEP10M。
+  详见 `spec/open/validation-p3-honest-benchmark.md` 和 `spec/open/memory-architecture.md`。
 - **P4-P5（探索性构想）**：分级存储、硬件亲和（NUMA/SPDK/GPU/PMEM）。这些方向当前
   无代码或设计支撑，仅为探索性路线设想
 
