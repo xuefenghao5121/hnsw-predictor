@@ -41,17 +41,22 @@ DiskHNSW MUST 在 cgroup 内存限额(≥512MB)下,使用磁盘驻留向量数�
 <!-- ════════════════════════════════════════════════════════════════ -->
 
 ## 关键性能承诺 {#CHR-003}
-<!-- ndf: kind=constraint level=must layer=L0 status=stable since=0.2 source=deduced -->
+<!-- ndf: kind=constraint level=must layer=L0 status=draft since=0.2 source=deduced -->
+<!-- updated=2026-07-30: DEC-039 标记之前数字为不诚实, 需重新验证 -->
+
+> ⚠️ **以下数字待诚实重新验证 (DEC-039)**
+> 之前在 30GB RAM 开发机上测量, page cache 白嫖了 8GB+ 数据。
+> 真实受限内存 (drop_caches + cgroup) 下性能可能显著降低。
 
 DiskHNSW 对 SIFT1M(128 维,100 万向量)MUST 达成以下指标:
 
-| 指标 | 值 | 条件 | 验证方式 |
-|------|-----|------|----------|
-| Recall@10 | ≥ 95% | 512MB cgroup | benchmark vs GT |
-| QPS (单线程) | ≥ 2000 | 512MB cgroup, CSR 压缩后 | benchmark |
-| QPS (4 线程) | ≥ 5000 | 512MB cgroup | benchmark |
+| 指标 | 值 (待验证) | 条件 | 验证方式 |
+|------|------------|------|----------|
+| Recall@10 | ≥ 95% | 512MB cgroup, drop_caches | benchmark vs GT |
+| QPS (单线程) | ≥ ? (原 2000) | 512MB cgroup, drop_caches | benchmark |
+| QPS (4 线程) | ≥ ? (原 5000) | 512MB cgroup, drop_caches | benchmark |
 | RSS | ≤ 300MB | 512MB cgroup | /proc/self/status |
-| 内存节省 | ≥ 2.5x | vs hnswlib 726MB | 对比测试 |
+| 内存节省 | ≥ 2.5x | vs hnswlib (相同条件) | 对比测试 |
 
 > rationale: 95% recall 是生产可接受的最低召回率阈值;
 > 2000 QPS 是单线程交互式搜索的可用阈值(<0.5ms 延迟)。
