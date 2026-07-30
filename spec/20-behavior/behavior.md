@@ -312,7 +312,7 @@ benchmark MUST 在 `benchmark_diskhnsw.cpp` 中：
 
 ## 初始化文件 I/O 路径 {#BEH-017}
 <!-- ndf: kind=req level=must layer=L1 status=stable since=0.5 source=verified -->
-<!-- verified=2026-07-30: DEC-039 pgmajfault 分析 + memory-architecture.md -->
+<!-- verified=2026-07-30: DEC-039 pgmajfault 分析 + ARCH-006 内存分配架构 -->
 
 ### graph.bin 加载行为
 
@@ -371,4 +371,4 @@ Fine Rerank MUST 根据环境变量选择 I/O 方式:
 2. **CSR pages** — CSRCache miss 时的 pread 页 (仅 CSR_ON_DISK=1)
 3. **系统文件页** — 共享库/locale (~5MB)
 
-> 参见 [[CON-MEM-010]] 内存预算约束 和 memory-architecture.md 完整分配表。
+> 参见 [[CON-MEM-010]] 内存预算约束 和 [[ARCH-006]] 内存分配架构。

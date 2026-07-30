@@ -210,3 +210,77 @@ graph TD
 
 > rationale: [[ARCH-002]] 确认当前无 #include 循环,但 `friend class`
 > 是语义上的反向耦合。未来拆分 God Class 时需一并处理。
+
+## 内存分配架构 {#ARCH-006}
+<!-- ndf: kind=arch level=L1 status=stable since=0.5 source=verified -->
+<!-- merged from memory-architecture.md (MEM-001~010), DEC-039 -->
+
+DiskHNSW 的内存分为**匿名内存**（进程分配，不可回收）和 **page cache**（文件页，内核可回收）。
+在 cgroup v2 中，两者共享 MemoryMax 预算。
+
+```
+cgroup MemoryMax = 匿名内存 + page cache
+                   ↑不可回收     ↑可回收(LRU)
+```
+
+### 文件 I/O 路径与内存分类
+
+| 文件 | I/O 方式 | 常驻内存 | page cache |
+|------|---------|---------|------------|
+| graph.bin | ifstream → 解析 → **fadvise 驱逐** | CSR 压缩数据 (匿名) | init 后为 0 |
+| blocks_64k.bin | **O_DIRECT** | BlockCache LRU slots (匿名) | **不进 page cache** |
+| vecblocks_64k.bin | pread (buffered) | 0 (仅 fd) | ✅ cgroup 计费 |
+| PQ codes | ifstream → 加载到 vector → **fadvise 驱逐** | pq_codes_ (匿名) | init 后为 0 |
+
+### SIFT1M 内存分配表 (512MB cgroup)
+
+**匿名内存 (不可回收):**
+
+| 组件 | 大小 | 说明 |
+|------|------|------|
+| CSR compact + offsets | 50MB | L0 邻接表 delta+varint 压缩 |
+| PQ codes | 31MB | 1M × 32B, Phase A ADC 距离 |
+| Upper layer vectors | 5MB | 63001 × 512B, 上层精确搜索 |
+| Flat vec cache | 32MB | 精确距离缓存 |
+| Block cache slots | 32MB | 512 × 64KB, L0 block LRU |
+| Fine slot table + route | 12MB | node→vecblocks 映射 |
+| BFS/route/VisitedList | 16MB | 映射表 + 访问标记 |
+| 线程栈/malloc | ~60MB | PQ LUT + 其他 |
+| **匿名总计** | **~234MB** | |
+
+**Page Cache (可回收):**
+
+| 组件 | 大小 | 说明 |
+|------|------|------|
+| vecblocks 热页 | ~48MB | 200 query Fine Rerank 工作集 |
+| **page cache 总计** | **~53MB** | |
+
+### DEEP10M 内存分配对比
+
+| 组件 | SIFT1M | DEEP10M | 倍数 |
+|------|--------|---------|------|
+| **匿名总计** | **234MB** | **1.1GB** | 5x |
+| vecblocks page cache | 48MB | 900MB | 19x |
+| CSR cache (进程内) | 0 | 256MB | - |
+| **总计** | **287MB** | **2.3GB** | 8x |
+
+### 稳态 vs 运行时峰值
+
+> **cgroup 预算不能只算稳态，MUST 预留 ~100MB 运行时开销。**
+
+| cgroup | 稳态内存 | 运行时峰值 | pgmajfault | QPS 影响 |
+|--------|---------|-----------|------------|---------|
+| 512MB | 287MB | ~398MB < 512 | 10 | 无 |
+| 384MB | 287MB | ~398MB > 384 | **5523** | **-43%** |
+
+运行时额外开销来源: malloc arena (+30MB), slot table 扫描 (+31MB),
+并发工作集放大 (+20MB), 内核 slab (+15MB)。
+
+### 开发预算参考
+
+```
+新增功能内存需求 = X MB
+
+SIFT1M 512MB: 余量 = 512 - 234 - 53 - 100 = 125MB
+DEEP10M 2GB:  余量 = 2048 - 1100 - 900 - 100 = -52MB (已紧张)
+```

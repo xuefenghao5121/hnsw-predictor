@@ -43,36 +43,50 @@ DiskHNSW MUST 在 cgroup 内存限额(≥512MB)下,使用磁盘驻留向量数�
 ## 关键性能承诺 {#CHR-003}
 <!-- ndf: kind=constraint level=must layer=L0 status=stable since=0.5 source=verified -->
 <!-- verified=2026-07-30: drop_caches + cgroup v2 诚实测量 -->
-<!-- see: spec/40-constraints/sla-redefinition.md -->
+<!-- merged: sla-redefinition.md SLA-001~006 -->
 
-> 完整 SLA 定义 (含 hnswlib 对比、cgroup 扫描、分级目标): `spec/40-constraints/sla-redefinition.md`
+### SLA 设计原则
 
-### SIFT1M (512MB cgroup)
+1. 所有数字 MUST 在 `drop_caches + cgroup v2` 下测量
+2. 每个数据集 MUST 同时报告 hnswlib 对比
+3. 分级: 可用(≥100 QPS) / 生产(≥500) / 高性能(≥1000)
 
-| 指标 | 目标 | 实测 (诚实) | 状态 |
-|------|------|-----------|------|
-| Recall@10 | ≥ 95% | 95.70% | ✅ |
-| QPS (4T) | ≥ 5000 | 5247 | ✅ |
-| QPS (1T) | ≥ 2000 | 2334 | ✅ |
-| RSS | ≤ 300MB | 275MB | ✅ |
-| vs hnswlib | ≥ 2x QPS | **10x** (@512MB) | ✅ |
+### 维度 1: 内存受限 (已验证 ✅)
 
-### DEEP10M (2GB cgroup)
+**SIFT1M (512MB cgroup, 4T):**
 
-| 指标 | 目标 | 实测 (诚实) | 状态 |
-|------|------|-----------|------|
-| Recall@10 | ≥ 95% | 95.15% | ✅ |
-| QPS (12T) | ≥ 1000 | 1762 | ✅ |
-| RSS | ≤ 1.5GB | 1401MB | ✅ |
-| hnswlib | 不可行 | OOM@2GB (需 6GB) | ✅ |
+| 指标 | 目标 | 实测 | hnswlib | 状态 |
+|------|------|------|---------|------|
+| Recall@10 | ≥ 95% | 95.70% | 95.25% | ✅ |
+| QPS (4T) | ≥ 5000 | 5247 | **527** | ✅ **10x** |
+| QPS (1T) | ≥ 2000 | 2334 | - | ✅ |
+| RSS | ≤ 300MB | 275MB | 726MB | ✅ |
 
-### DEEP10M 紧凑模式 (1.5GB cgroup)
+**DEEP10M (2GB cgroup, 12T):**
 
-| 指标 | 目标 | 实测 (诚实) | 状态 |
-|------|------|-----------|------|
-| Recall@10 | ≥ 95% | 95.15% | ✅ |
-| QPS (12T) | ≥ 300 | 327 | ✅ |
-| hnswlib | 不可行 | OOM | ✅ |
+| 指标 | 目标 | 实测 | hnswlib | 状态 |
+|------|------|------|---------|------|
+| Recall@10 | ≥ 95% | 95.15% | OOM | ✅ |
+| QPS (12T) | ≥ 1000 | 1762 | OOM | ✅ |
+| RSS | ≤ 1.5GB | 1401MB | ~6GB | ✅ |
+
+**DEEP10M 紧凑 (1.5GB cgroup, 12T):**
+
+| 指标 | 目标 | 实测 | hnswlib | 状态 |
+|------|------|------|---------|------|
+| Recall@10 | ≥ 95% | 95.15% | OOM | ✅ |
+| QPS (12T) | ≥ 300 | 327 | OOM | ✅ |
+
+### 维度 2: 全量放开 (待优化 🔴)
+
+> 内存充裕时 SHOULD 达到 hnswlib 70%+ QPS (DEC-044)
+
+| 配置 | 当前 | 目标 | 差距根因 (DEC-043) |
+|------|------|------|-------------------|
+| 1T (2GB cgroup) | QPS 2492 (hnswlib 21%) | ≥ 8000 (70%+) | 两阶段额外开销: PhaseA 57% + Fine 38% |
+| 4T (2GB cgroup) | QPS 5693 (hnswlib 49%) | ≥ 8000 (70%+) | hnswlib 4T 有锁瓶颈 |
+
+优化路径 (DEC-045): PhaseA+Fine 融合(-40%) + 批量pread(-20%) + PQ SIMD(-15%) + cache增大(-10%) → 0.40→0.18ms
 
 > rationale: 95% recall 是生产可接受的最低召回率阈值;
 > 2000 QPS 是单线程交互式搜索的可用阈值(<0.5ms 延迟)。
@@ -95,7 +109,7 @@ DiskHNSW 的设计意图是**从 1M 验证走向 100M 生产**：
   CSR 上磁盘 + CSRCache LRU 分页缓存, 节省 553MB 匿名内存 (DEEP10M)。
   初始化后 posix_fadvise(DONTNEED) 驱逐 graph/PQ/bfs 文件页。
   诚实 benchmark (drop_caches) 已验证 SIFT1M 和 DEEP10M。
-  详见 `spec/open/validation-p3-honest-benchmark.md` 和 `spec/open/memory-architecture.md`。
+  详见 `spec/open/validation-p3-honest-benchmark.md` 和 `spec/10-architecture/modules.md` ARCH-006。
 - **P4-P5（探索性构想）**：分级存储、硬件亲和（NUMA/SPDK/GPU/PMEM）。这些方向当前
   无代码或设计支撑，仅为探索性路线设想
 
@@ -106,7 +120,7 @@ DiskHNSW 的设计意图是**从 1M 验证走向 100M 生产**：
 2. **全量放开维度**：内存充裕时, DiskHNSW SHOULD 达到 hnswlib 70%+ QPS (当前 21%, 需优化)
    - 差距根因: 两阶段搜索的额外开销 (PQ 粗筛 57% + Fine Rerank 38%)
    - 优化路径: PhaseA+Fine 融合 / PQ SIMD / 批量 pread / flat_vec_cache 增大
-   - 详见 `spec/40-constraints/sla-redefinition.md` SLA-006
+   - 详见 charter CHR-003 维度 2 + DEC-045 优化路径
 
 > rationale: 1M 规模下宿主机 page cache 能装下全部 496MB 向量数据，
 > 掩盖了磁盘 I/O 优化的真实价值。10M 规模验证了瓶颈转移 (I/O -> PQ 计算)。
