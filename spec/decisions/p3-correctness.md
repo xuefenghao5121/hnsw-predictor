@@ -378,3 +378,32 @@ PQ_HYBRID 已在 Phase A 中为 cache-hit 节点提供精确距离，Phase B 批
 **DEC-045 P1 (PhaseA+Fine 融合) 正式关闭。**
 
 替代方向: PQ SIMD dsub=4 (-15%), flat_vec_cache 增大 (-10%), ef_search 自适应。
+
+## D-052: l2Distance AVX2 SIMD 优化 — 验证通过 {#DEC-052}
+<!-- ndf: kind=decision date=2026-07-30 affects=SLA-006,DEC-045 source=verified -->
+
+**Context.** 原 l2Distance 为标量实现 ("保持与 hnswlib 一致, 作为公平对比基线")。
+但 hnswlib 内部已用 AVX2，这个"基线"实际对自己不公平。
+PQ SIMD dsub=4 分析发现 PQ 距离计算仅占 PhaseA 8%，但 l2Distance 标量实现
+占 PhaseA + Fine Rerank 总计算量的 ~18%。
+
+**改动.** AVX2 + FMA 实现: 8-wide load + sub + fmadd + horizontal sum。
+SIFT 128D = 4 iterations，DEEP 96D = 3 iterations + 0 tail。
+
+**结果:**
+
+| 场景 | 标量 | AVX2 | 变化 |
+|------|------|------|------|
+| SIFT1M 2GB 4T | 6219 | **7231** | **+16.3%** |
+| SIFT1M 512MB 4T | 5489 | **6188** | +12.7% |
+| SIFT1M 2GB 1T | 2053 | 2111 | +2.8% |
+| DEEP10M 2GB 12T | 1929 | 1848 | -4.2% (noise) |
+
+**vs hnswlib 全量放开:**
+- 差距从 1.88x 缩小到 **1.62x** (4T: 7231 vs 11673)
+
+**Decision.** AVX2 l2Distance 采纳。SIFT1M 主要受益（128D 多次 l2 调用），
+DEEP10M 无显著变化（瓶颈在 I/O 不在计算）。
+
+**教训:** "公平对比基线"应该用相同的 SIMD 级别，而非标量 vs SIMD。
+NDF OPT 路线 "PQ SIMD dsub=4" 的实际收益来自 l2Distance 而非 PQ 距离计算。
