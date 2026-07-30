@@ -77,19 +77,29 @@ DiskHNSW MUST 在 cgroup 内存限额(≥512MB)下,使用磁盘驻留向量数�
 | Recall@10 | ≥ 95% | 95.15% | OOM | ✅ |
 | QPS (12T) | ≥ 300 | 327 | OOM | ✅ |
 
-### 维度 2: 全量放开 (待优化 🔴)
+### 维度 2: 全量放开 (P4 优化完成, 接近目标)
 
 > 内存充裕时 SHOULD 达到 hnswlib 70%+ QPS (DEC-044)
-<!-- updated=2026-07-30: DEC-052 AVX2 l2Distance 后数据 -->
+<!-- updated=2026-07-31: P4 三轮优化实验完成 -->
 
-| 配置 | 当前 | 目标 | 差距根因 (DEC-043) |
-|------|------|------|-------------------|
-| 1T (2GB cgroup) | QPS 2111 (hnswlib 18%) | ≥ 8000 (70%+) | 两阶段额外开销: PhaseA 57% + Fine 38% |
-| 4T (2GB cgroup) | QPS 7231 (hnswlib 62%) | ≥ 8000 (70%+) | 接近目标, 多线程 scale 更好 |
+| 配置 | 当前 | 目标 | 状态 |
+|------|------|------|------|
+| 4T (2GB cgroup) | QPS 7067 (hnswlib 60%) | ≥ 8171 (70%+) | 🔴 还差 10% |
+| 1T (2GB cgroup) | QPS ~2200 (hnswlib 19%) | ≥ 8000 (70%+) | 🔴 两阶段开销大 |
 
-优化进展: P1 pread合并(+19%) + AVX2 l2Distance(+16%) → 4T 差距从 1.88x 缩至 **1.62x**。
-下一步: flat_vec_cache 增大 + ef_search 自适应。
-已否决: PhaseA+Fine 融合(DEC-051, inline I/O 无法批量化)。
+P4 优化实验总结:
+- ✅ P1 pread 合并 (DEC-047): +9~146%, 有效保留
+- ✅ AVX2 l2Distance (DEC-052): +16%, 有效保留
+- ❌ flat_vec_cache 解耦 (DEC-053): FLAT_VEC_MB=64 已最优, L3 局部性恶化
+- ❌ ef_search 自适应 (DEC-054): PQ margin 裁剪在 recall≥95% 无收益
+- ❌ io_uring Fine Rerank (DEC-055): page cache 均衡器效应, buffered I/O 下无优势
+- ❌ PhaseA+Fine 融合 (DEC-051): inline I/O 无法批量化
+
+**P4 阶段定论**: 在 buffered I/O + page cache warm 场景下,
+4T 差距从 2.05x 缩至 **1.62x**, 进一步优化需要换赛道:
+- 100M 规模 (page cache 不再 cover 全部数据)
+- O_DIRECT + io_uring (绕过 page cache)
+- SPDK / GPU / PMEM (P5 硬件路线)
 
 > rationale: 95% recall 是生产可接受的最低召回率阈值;
 > 2000 QPS 是单线程交互式搜索的可用阈值(<0.5ms 延迟)。
@@ -122,8 +132,8 @@ DiskHNSW 的设计意图是**从 1M 验证走向 100M 生产**：
 1. **内存受限维度**：给定 cgroup 限额, DiskHNSW MUST 显著优于 hnswlib (当前已验证 ✅)
 2. **全量放开维度**：内存充裕时, DiskHNSW SHOULD 达到 hnswlib 70%+ QPS (当前 21%, 需优化)
    - 差距根因: 两阶段搜索的额外开销 (PQ 粗筛 57% + Fine Rerank 38%)
-   - 优化路径: PhaseA+Fine 融合 / PQ SIMD / 批量 pread / flat_vec_cache 增大
-   - 详见 charter CHR-003 维度 2 + DEC-045 优化路径
+   - 优化路径: P1 pread合并(✅) + AVX2 l2(✅) + flat_vec_cache(❌) + ef_search(❌) + io_uring(❌)
+   - 详见 charter CHR-003 维度 2 + DEC-045~055 决策链
 
 > rationale: 1M 规模下宿主机 page cache 能装下全部 496MB 向量数据，
 > 掩盖了磁盘 I/O 优化的真实价值。10M 规模验证了瓶颈转移 (I/O -> PQ 计算)。

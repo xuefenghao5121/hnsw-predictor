@@ -1,3 +1,4 @@
+> **STATUS**: Superseded by DEC-055 finding (page cache 均衡器效应). Revivable with O_DIRECT at P5.
 # Proposal: 冷 I/O 模式 -- 通过 Page Cache 驱逐在 1M 规模制造真实 I/O 瓶颈
 
 > 提案日期: 2026-07-29

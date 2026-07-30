@@ -1,3 +1,4 @@
+> **STATUS**: Superseded by DEC-055 finding (page cache 均衡器效应). Revivable with O_DIRECT at P5.
 # Proposal: O_DIRECT io_uring 零 Page Cache 架构 {#PROP-DIRECT-IO}
 
 > 关联决策: DEC-030

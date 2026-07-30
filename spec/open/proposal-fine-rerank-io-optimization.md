@@ -1,3 +1,4 @@
+> **STATUS**: Superseded by DEC-055 finding (page cache 均衡器效应). Revivable with O_DIRECT at P5.
 # Proposal: Fine Rerank I/O 效率优化--Page Search + Page Shuffle + Dynamic Width
 
 > 来源论文: "I/O Optimizations for Graph-Based Disk-Resident ANN Search: A Design Space Exploration" (VLDB 2026, Liang Li et al.)
