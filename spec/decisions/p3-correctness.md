@@ -440,3 +440,43 @@ NDF OPT 路线 "PQ SIMD dsub=4" 的实际收益来自 l2Distance 而非 PQ 距�
 - 小 hash table → 高 L3 命中但低覆盖率
 - 大 hash table → 高覆盖率但低 L3 命中
 - 对 SIFT1M, 64MB (13% 覆盖) 是最佳平衡点
+
+## D-054: ef_search 自适应 (PQ 距离 margin 裁剪) — 实验否决 {#DEC-054}
+<!-- ndf: kind=decision date=2026-07-31 affects=SLA-006 source=verified -->
+
+**Context.** Phase A 产出 ef_coarse=100~300 个 PQ 候选，全部送 Fine Rerank。
+假设按 PQ 距离 margin (best_dist × margin) 裁剪可减少 Fine Rerank I/O 量。
+
+**方案.** ADAPTIVE_EF=1 ADAPTIVE_MARGIN=M:
+- 保留 PQ 距离 < best_dist × M 的候选
+- 至少保留 2k 个 (recall 保障)
+- M>5 时等价于不裁剪 (所有候选都保留)
+
+**实验 (SIFT1M 2GB 4T):**
+
+| MARGIN | Recall | QPS | 变化 |
+|--------|--------|-----|------|
+| baseline | 95.70% | ~7000 | - |
+| 3.0 | 95.40% | ~7300 | +4% (噪声范围内) |
+| 1.5 | 94.60% | ~8000 | +14% (**recall < 95%**) |
+
+**DEEP10M 2GB 12T:**
+
+| MARGIN | Recall | QPS |
+|--------|--------|-----|
+| baseline | 95.15% | 1973 |
+| 3.0 | 95.15% | 1813 (-8%) |
+
+**根因.**
+1. SIFT1M 基线 QPS 方差 ~15% (6078~7261), 自适应效果 (~4%) 被噪声淹没
+2. DEEP10M PQ dim=96 精度高, margin 裁剪几乎不减少候选 → 无收益甚至负收益
+3. recall≥95% 约束下, margin 必须 ≥5.0 (等价于不裁剪) 才能保持 recall
+
+**Decision.** PQ 距离 margin 裁剪否决:
+- recall≥95% 时无可靠 QPS 提升
+- margin=1.5 可作为"性能模式"(recall~94.5%, +14% QPS), 但不满足 SLA 约束
+- 代码不留
+
+**教训.** searchLayer0 的 early termination (`candidateDist > lowerBound && size==ef → break`)
+已经自动处理了"简单 query 早停"的场景。Fine Rerank 的候选数 (100~300) 不大,
+裁剪几个候选的 I/O 节省不足以抵消 PQ 距离误差带来的 recall 损失。
