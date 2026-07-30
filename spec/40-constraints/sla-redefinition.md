@@ -116,16 +116,47 @@ hnswlib 在 768MB+ 时性能更高 (全内存零开销), 但内存占用 726MB v
 
 ---
 
-## 演进 SLA 目标 (未验证) {#SLA-005}
-<!-- ndf: kind=constraint level=may layer=L0 status=exploratory since=0.5 source=deduced -->
+## 全量放开 SLA (与 hnswlib 直接竞争) {#SLA-006}
+<!-- ndf: kind=constraint level=should layer=L0 status=exploratory since=0.5 source=deduced -->
+<!-- verified=2026-07-30: 差距根因已定位, 优化方向已识别 -->
 
-> 以下目标为未来优化的方向, 当前未验证。
+> DiskHNSW 不仅要在内存受限时赢 hnswlib, 还要在内存充裕时与 hnswlib 接近。
+> 这要求两阶段搜索的额外开销可接受。
 
-| 优化 | 目标 | 依据 | 优先级 |
-|------|------|------|--------|
-| 批处理 I/O 去重 | DEEP10M 1.5GB QPS 327→1000+ | Q-006 理论 10x | 🔴 |
-| CSR cache 增大 | DEEP10M 1.5GB hit rate 46%→92% | DEC-042 | 🟡 |
-| SIFT1M 256MB 优化 | QPS 423→1000+ | 当前 page cache 不足 | 🟡 |
+### 现状: 与 hnswlib 的差距 (SIFT1M, 2GB cgroup, 无内存约束)
+
+| 配置 | hnswlib | DiskHNSW | 差距 | DiskHNSW 时间分解 |
+|------|---------|----------|------|----------------|
+| 1T ef=50 | 0.09ms QPS 11565 | 0.40ms QPS 2492 | **4.6x** | PhaseA 230μs(57%) + Fine 190μs(38%) + 其他 20μs |
+| 4T ef=50 | QPS 11673 | QPS 5693 | **2.1x** | (hnswlib 4T 有锁瓶颈, 不 scale) |
+| 1T ef=100 | 0.16ms QPS 6392 | 0.40ms QPS 2492 | 2.6x | (hnswlib ef=100 recall 98.3%, 不可比) |
+
+### 差距根因
+
+1. **两阶段额外开销 (主因)**: PQ 粗筛 + Fine Rerank 做了两遍距离计算, hnswlib 一遍
+2. **PQ 粗筛效率**: Phase A 230μs 访问 ~100 节点, 每节点 PQ ADC ~2μs + 邻居展开
+3. **Fine Rerank I/O**: 100 候选 × 4KB pread = ~190μs (即使全在 page cache)
+4. **无额外收益的图遍历**: DiskHNSW 的 Phase A 用 PQ 近似距离遍历图, 效率低于精确距离
+
+### 优化路径 (从 4.6x 缩小到 ≤1.5x)
+
+| 优化 | 预期收益 | 机制 | 难度 |
+|------|---------|------|------|
+| PhaseA+FineRerank 融合 | -40% (230+190→250μs) | 边遍历边精排, 共享 candidate set | 🔴 高 |
+| PQ SIMD 优化 (dsub=4 AVX2) | -15% (230→180μs) | 已有但未充分利用 | 🟡 中 |
+| Fine Rerank 批量 pread | -20% (190→150μs) | 合并相邻页, 减少系统调用 | 🟡 中 |
+| flat_vec_cache 增大 | -10% | 更多候选命中缓存, 减少 pread | 🟢 低 |
+| ef_search 自适应 | -10% | 简单 query 少遍历, 难 query 多展开 | 🟡 中 |
+| **合计** | **0.40→0.20ms** | QPS 5000→接近 hnswlib 6392 | - |
+
+### 目标 SLA (待优化后验证)
+
+| 指标 | 目标 | 当前 | 依据 |
+|------|------|------|------|
+| QPS (1T, 无约束) | ≥ 8000 (hnswlib 70%+) | 2492 | 需 3.2x 提升 |
+| QPS (4T, 无约束) | ≥ 10000 | 5693 | 需 1.8x 提升 |
+| Recall@10 | ≥ 95% | 95.70% | ✅ 已达标 |
+| vs hnswlib (相同内存) | ≥ 70% QPS | 21% (1T) | 需优化 |
 
 ---
 

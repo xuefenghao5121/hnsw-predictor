@@ -101,9 +101,17 @@ DiskHNSW 的设计意图是**从 1M 验证走向 100M 生产**：
 
 每个阶段的核心验证：**"给定内存预算 M，DiskHNSW 能跑多大规模的向量搜索？"**
 
+**双维度目标**：
+1. **内存受限维度**：给定 cgroup 限额, DiskHNSW MUST 显著优于 hnswlib (当前已验证 ✅)
+2. **全量放开维度**：内存充裕时, DiskHNSW SHOULD 达到 hnswlib 70%+ QPS (当前 21%, 需优化)
+   - 差距根因: 两阶段搜索的额外开销 (PQ 粗筛 57% + Fine Rerank 38%)
+   - 优化路径: PhaseA+Fine 融合 / PQ SIMD / 批量 pread / flat_vec_cache 增大
+   - 详见 `spec/40-constraints/sla-redefinition.md` SLA-006
+
 > rationale: 1M 规模下宿主机 page cache 能装下全部 496MB 向量数据，
 > 掩盖了磁盘 I/O 优化的真实价值。10M 规模验证了瓶颈转移 (I/O -> PQ 计算)。
 > 100M 规模 CSR 内存将成为新瓶颈，需要新的架构决策。
+> 全量放开场景要求 DiskHNSW 不是"退而求其次"的方案, 而是通用高性能方案。
 
 ## 设计约束(推断) {#CHR-005}
 <!-- ndf: kind=constraint level=should layer=L0 status=stable since=0.2 source=deduced -->
