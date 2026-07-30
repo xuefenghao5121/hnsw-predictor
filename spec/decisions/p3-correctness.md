@@ -480,3 +480,54 @@ NDF OPT 路线 "PQ SIMD dsub=4" 的实际收益来自 l2Distance 而非 PQ 距�
 **教训.** searchLayer0 的 early termination (`candidateDist > lowerBound && size==ef → break`)
 已经自动处理了"简单 query 早停"的场景。Fine Rerank 的候选数 (100~300) 不大,
 裁剪几个候选的 I/O 节省不足以抵消 PQ 距离误差带来的 recall 损失。
+
+## D-055: io_uring 批量 Fine Rerank — 实验否决 {#DEC-055}
+<!-- ndf: kind=decision date=2026-07-31 affects=SLA-006 source=verified -->
+
+**Context.** Fine Rerank 用 pread 逐页读, 多线程需 FINE_PREAD=1。
+假设用 thread_local io_uring 批量提交可利用 NVMe 并行 + 内核 I/O 合并。
+
+**方案演进:**
+1. 自定义 IoUring wrapper (128 entries, 8KB buffers): SIFT1M +25% 但 DEEP10M recall 崩溃 (buffer 不足)
+2. liburing 直接调用 (64KB buffers, merged reads): SIFT1M -4%, DEEP10M +1%
+3. 分批提交 (256+ ranges → 2 batches of 128): memcpy 开销抵消收益
+
+**实验:**
+
+| 配置 | SIFT1M 4T QPS | DEEP10M 12T QPS | DEEP10M Recall |
+|------|---------------|-----------------|----------------|
+| pread baseline | ~6400 | 1973 | 95.15% |
+| IoUring wrapper (8KB) | ~8000 (噪声?) | — | 54% (buffer 不足) |
+| liburing (64KB, 128 bufs) | 5908 | — | 58% (range > 128) |
+| liburing + batch | 6152 | 1997 | 95.15% ✓ |
+
+**微基准 (100 random pages, warm cache):**
+
+| 方法 | 延迟/query |
+|------|-----------|
+| pread 100×4KB | 28.9 μs |
+| pread 10×40KB (merged) | 13.7 μs |
+| io_uring 100×4KB | 24.3 μs |
+| io_uring 10×64KB (merged) | 0.8 μs |
+
+**根因分析:**
+1. **微基准 vs 实际**: 微基准用 liburing registered buffers + prep_read_fixed (0.8μs), 
+   实际需要 unordered_map page_ptr + memcpy(4KB/page) + batch 间数据保护
+2. **Page cache 均衡器**: SIFT1M(496MB)/DEEP10M(3.7GB) 都能放入 30GB RAM 的 OS page cache
+   - pread on cached page = memcpy from page cache → 即时
+   - io_uring on cached page = submit + CQ poll → 额外开销
+   - 两者命中相同的 page cache, io_uring 多一层 syscall
+3. **Batch memcpy 开销**: 大规模 ranges(250+)需要分批, 每批的 buffer 会在下批覆写,
+   必须 memcpy 到 page_data unique_ptr, 抵消了 zero-copy 优势
+4. **O_DIRECT 才是 io_uring 的战场**: 现有 FINE_BUFFERED=1 (buffered I/O) 下,
+   page cache 使 io_uring 无优势
+
+**Decision.** io_uring 批量 Fine Rerank 否决:
+- Warm page cache 下 io_uring 无优势 (submit/wait 开销 ≈ pread memcpy)
+- Batch memcpy 开销抵消 zero-copy 收益
+- 需要 O_DIRECT + SPDK 才能发挥 io_uring 真正优势 (P5 阶段)
+
+**教训.** 
+- 微基准 ≠ 实际: registered buffer + prep_read_fixed 的 0.8μs 在实际代码中变成 6μs+
+- Page cache 是 I/O 的伟大均衡器: 所有 buffered I/O 路径最终都命中同一缓存
+- io_uring 的优势在 cold I/O + O_DIRECT, 不在 warm page cache
