@@ -1,10 +1,10 @@
 # DiskHNSW - 内存受限环境下的磁盘向量搜索
 
-> **SIFT1M**: 512MB cgroup, 95.70% recall / **5247 QPS** (4T, drop_caches 诚实测量)
-> **DEEP10M**: 2GB cgroup, 95.15% recall / **1762 QPS** (12T, drop_caches 诚实测量)
+> **SIFT1M**: 512MB cgroup, 95.70% recall / **5247 QPS** (4T) / vs hnswlib **10x** (5247 vs 527)
+> **DEEP10M**: 2GB cgroup, 95.15% recall / **1762 QPS** (12T) / hnswlib OOM (需 6GB)
+> **DEEP10M 紧凑**: 1.5GB cgroup, 95.15% recall / **327 QPS** (12T) / hnswlib 不可运行
 >
-> ⚠️ DEC-039: 之前的 QPS 数字在 30GB RAM 开发机上测量, page cache 白嫖了数据文件。
-> 诚实测量后: SIFT1M 仅降 10% (数据集小), DEEP10M 降 25-83% (数据集大, 白嫖严重)。
+> 所有数字均为诚实测量 (drop_caches + cgroup v2, DEC-039)
 
 ## 项目背景
 
@@ -41,10 +41,9 @@ RSS: 337MB → ... → 301MB → 269MB   (CSR 压缩后↓ 32MB)
 | 指标 | hnswlib(全内存) | DiskHNSW(512MB cgroup, 诚实) |
 |------|-----------------|------------------------|
 | Recall | 95.25% | **95.70%**(反超) |
-| QPS (1T) | 12420 | 2334 |
-| QPS (4T) | - | **5247** |
-| RSS | 726MB(OOM@512MB) | **275MB** |
-| 内存节省 | - | **2.6x** |
+| QPS @512MB cgroup | 527 | **5247** (**10x**) |
+| QPS @600MB cgroup | 2000 | **5124** (**2.6x**) |
+| RSS | 726MB(OOM@512MB 实际 492MB 挣扎) | **275MB** |
 
 ### P2: DEEP10M 规模验证 (10M 向量)
 

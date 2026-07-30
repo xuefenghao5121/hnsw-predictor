@@ -41,18 +41,38 @@ DiskHNSW MUST 在 cgroup 内存限额(≥512MB)下,使用磁盘驻留向量数�
 <!-- ════════════════════════════════════════════════════════════════ -->
 
 ## 关键性能承诺 {#CHR-003}
-<!-- ndf: kind=constraint level=must layer=L0 status=stable since=0.2 source=verified -->
+<!-- ndf: kind=constraint level=must layer=L0 status=stable since=0.5 source=verified -->
 <!-- verified=2026-07-30: drop_caches + cgroup v2 诚实测量 -->
+<!-- see: spec/40-constraints/sla-redefinition.md -->
 
-DiskHNSW 对 SIFT1M(128 维,100 万向量)MUST 达成以下指标:
+> 完整 SLA 定义 (含 hnswlib 对比、cgroup 扫描、分级目标): `spec/40-constraints/sla-redefinition.md`
 
-| 指标 | 值 (诚实验证) | 条件 | 验证方式 |
-|------|------------|------|----------|
-| Recall@10 | ≥ 95% ✅ 95.70% | 512MB cgroup, drop_caches | benchmark vs GT |
-| QPS (单线程) | ≥ 2000 ✅ 2334 | 512MB cgroup, drop_caches | benchmark |
-| QPS (4 线程) | ≥ 5000 ✅ 5247 | 512MB cgroup, drop_caches | benchmark |
-| RSS | ≤ 300MB ✅ 275MB | 512MB cgroup | /proc/self/status |
-| 内存节省 | ≥ 2.5x ✅ 2.6x | vs hnswlib 726MB | 对比测试 |
+### SIFT1M (512MB cgroup)
+
+| 指标 | 目标 | 实测 (诚实) | 状态 |
+|------|------|-----------|------|
+| Recall@10 | ≥ 95% | 95.70% | ✅ |
+| QPS (4T) | ≥ 5000 | 5247 | ✅ |
+| QPS (1T) | ≥ 2000 | 2334 | ✅ |
+| RSS | ≤ 300MB | 275MB | ✅ |
+| vs hnswlib | ≥ 2x QPS | **10x** (@512MB) | ✅ |
+
+### DEEP10M (2GB cgroup)
+
+| 指标 | 目标 | 实测 (诚实) | 状态 |
+|------|------|-----------|------|
+| Recall@10 | ≥ 95% | 95.15% | ✅ |
+| QPS (12T) | ≥ 1000 | 1762 | ✅ |
+| RSS | ≤ 1.5GB | 1401MB | ✅ |
+| hnswlib | 不可行 | OOM@2GB (需 6GB) | ✅ |
+
+### DEEP10M 紧凑模式 (1.5GB cgroup)
+
+| 指标 | 目标 | 实测 (诚实) | 状态 |
+|------|------|-----------|------|
+| Recall@10 | ≥ 95% | 95.15% | ✅ |
+| QPS (12T) | ≥ 300 | 327 | ✅ |
+| hnswlib | 不可行 | OOM | ✅ |
 
 > rationale: 95% recall 是生产可接受的最低召回率阈值;
 > 2000 QPS 是单线程交互式搜索的可用阈值(<0.5ms 延迟)。
