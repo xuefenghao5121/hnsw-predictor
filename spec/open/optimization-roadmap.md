@@ -1,7 +1,8 @@
 # Optimization Roadmap — 实验结果与待验证项
 
-> 更新: 2026-07-30 (DEC-046~050 实验完成, 代码回退到 P1 pread merge 最佳状态)
-> 状态: 18 个 idea 已验证, 12 个待实现
+> 更新: 2026-07-30 (DEC-051 PhaseA+Fine 融合实验否决)
+> 状态: 19 个 idea 已验证, 11 个待实现
+> 代码状态: 干净的 P1 pread merge 最佳实现 (DEC-047)
 
 ---
 
@@ -23,20 +24,22 @@
 |----|------|------|------|
 | DEC-019 | Dynamic Width | PQ 搜索不收敛 | 架构特性 |
 | DEC-038 | 图裁剪 10M | 0% QPS gain | CSR 非瓶颈 |
-| DEC-046 | CSR cache 增大 256→512MB | hit_rate 68.4%→68.4% | 工作集已在 cache 内 |
+| DEC-046 | CSR cache 增大 256→512MB | hit_rate 不变 | 工作集已在 cache 内 |
 | DEC-048 | P2 query 重排序 | QPS 反降 | 预计算开销 > 缓存收益 |
 | DEC-049 | Page Shuffle @10M | -2.6%~-27.8% | 破坏 BFS block 局部性 |
 | DEC-050 | Page Search | 逻辑否决 | Shuffle 前提失败 |
+| DEC-051 | PhaseA+Fine 融合 | 慢 20 倍 | inline I/O 分散, 批量 I/O 是架构优势 |
 
 ### 已关闭系列
 
 | 系列 | 结论 |
 |------|------|
-| DEC-017 Page Search | ❌ 1M 边际, 10M 逻辑关闭 |
-| DEC-018 Page Shuffle | ❌ 1M 边际, 10M 负收益 |
-| DEC-019 Dynamic Width | ❌ PQ 搜索不收敛 |
+| DEC-017~019 Page Search/Shuffle/DynamicWidth | ❌ BFS block 级重排已足够 |
+| DEC-046~048 CSR cache/Query sort | ❌ 工作集已在 cache, 排序无法减少 cold miss |
+| DEC-051 PhaseA+Fine 融合 | ❌ 两阶段分离是 I/O 批量化优势, 非瓶颈 |
 
-> **BFS block 级重排已足够好，页级优化在当前架构下无收益。**
+> **核心认知: 两阶段搜索的分离不是缺陷, 而是 I/O 批量化的架构优势。**
+> **BFS block 级重排已足够好, 页级和融合优化在当前架构下无收益。**
 
 ---
 
@@ -45,13 +48,14 @@
 ### 🔴 优先级 1: 全量放开性能优化 (SLA-006)
 
 > 目标: DiskHNSW 1T QPS 2492 → 8000+ (hnswlib 70%)
-> 当前差距: 4.6x, 根因: 两阶段搜索 (PhaseA 57% + Fine 38%)
+> 当前差距: 4.6x, 根因: 两阶段计算开销 (PhaseA 57% + Fine 38%)
+> DEC-051 证明: 不能通过融合消除两阶段, 应减少各阶段计算量
 
 | # | 优化 | 预期 | 难度 | 状态 |
 |---|------|------|------|------|
-| 1 | **PhaseA+Fine 融合** (DEC-045 P1) | -40% 延迟 | 🔴 高 | 未开始 |
-| 2 | **PQ SIMD dsub=4** (DEC-036 ext) | -15% PhaseA | 🟡 中 | 未开始 |
-| 3 | **flat_vec_cache 增大** (DEC-045 P4) | -10% Fine | 🟢 低 | 未开始 |
+| 1 | **PQ SIMD dsub=4** (DEC-036 ext) | -15% PhaseA | 🟡 中 | 未开始 |
+| 2 | **flat_vec_cache 增大** 32→64MB | -10% Fine | 🟢 低 | 未开始 |
+| 3 | **ef_search 自适应** | -10% 变速 | 🟡 中 | 未开始 |
 
 ### 🟡 优先级 2: 紧凑部署优化 (1.5GB cgroup)
 
@@ -75,7 +79,6 @@
 | 9 | **100M 数据集** (P3-7) | 验证规模上限 | 🔴 高 | 未开始 |
 | 10 | **SPDK 用户态 I/O** (DEC-027) | 2-3x I/O 带宽 | 🔴 高 | P4 探索 |
 | 11 | **学习式剪枝 GBDT** (DEC-028) | 1.1-1.6x 吞吐 | 🔴 高 | P2.5 探索 |
-| 12 | **GPU/PMEM/NUMA** (P5) | 未知 | 🔴 高 | P5 探索 |
 
 ---
 
@@ -84,6 +87,7 @@
 | ID | 问题 | 结论 |
 |----|------|------|
 | Q-001 | 图遍历规模上限 | 10M 可行 ✅, 100M 需关注 CSR 4.7GB 上磁盘 |
+| Q-002 | Fine Rerank 学习式剪枝 | 开放 (依赖 profiling 数据) |
 | Q-003 | 数据集规模选择 | SIFT1M + DEEP10M ✅ |
 | Q-004 | PQ M 值选择 | M=32 ✅ |
 | Q-005 | 路由表方向 | dual-route-table ✅ |
