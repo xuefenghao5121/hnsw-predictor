@@ -351,3 +351,30 @@ vecblocks 3.7GB >> page cache, Shuffle 应有更大收益。
 4. **优先级低于**: PhaseA+Fine 融合 (-40%) 和 PQ SIMD (-15%) 收益远大于此
 
 **正式关闭 DEC-017 (Page Search) 和 DEC-018 (Page Shuffle)。**
+
+## D-051: PhaseA+Fine 融合 (FUSED_SEARCH) — 实验否决 {#DEC-051}
+<!-- ndf: kind=decision date=2026-07-30 affects=DEC-045,SLA-006 source=verified -->
+
+**Context.** DEC-045 P1 提出"边遍历边精排"融合方案，消除两阶段分离开销。
+
+**实验.** searchLayer0 PQ 模式中 cache-miss 时 inline pread(4KB) 精确化距离。
+
+**结果 (SIFT1M 2GB 1T):**
+
+| 模式 | Recall | QPS | 延迟 |
+|------|--------|-----|------|
+| Baseline (PQ + Fine Rerank) | 95.70% | **6219** | 0.16ms |
+| FUSED_SEARCH | 96.20% | **311** | 3.2ms |
+
+**FUSED_SEARCH 慢 20 倍。**
+
+**根因.** I/O 模式效率差异：
+- Fine Rerank (批量): 100 候选 → ~60 unique pages → 排序合并 → 5~10 次大 pread(64KB)
+- FUSED (inline): 图遍历中 ~200 次独立 pread(4KB)，随机分散，无法合并
+
+**Decision.** 融合方案否决。两阶段分离不是性能瓶颈，而是 **I/O 批量化的架构优势**。
+PQ_HYBRID 已在 Phase A 中为 cache-hit 节点提供精确距离，Phase B 批量 pread 效率远高于 inline。
+
+**DEC-045 P1 (PhaseA+Fine 融合) 正式关闭。**
+
+替代方向: PQ SIMD dsub=4 (-15%), flat_vec_cache 增大 (-10%), ef_search 自适应。
