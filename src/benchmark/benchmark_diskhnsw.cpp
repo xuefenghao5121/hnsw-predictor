@@ -237,5 +237,10 @@ int main(int argc, char** argv) {
               << " skipped=" << pf.prefetch_skipped
               << " failed=" << pf.prefetch_failed << std::endl;
 
+    // P3: CSRCache 统计
+    if (auto* csr_cache = hnsw->getCSRCache()) {
+        csr_cache->printStats();
+    }
+
     return 0;
 }

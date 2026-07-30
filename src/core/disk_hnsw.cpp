@@ -2585,6 +2585,27 @@ void DiskHNSW::buildInMemoryAdjacency() {
               << " (raw would be " << raw_mb << "MB, "
               << std::fixed << std::setprecision(1) << (double)raw_mb / (compact_mb + offset_mb)
               << "x compression)" << std::endl;
+
+    // ---- P3: 可选 CSR 上磁盘 ----
+    // CSR_ON_DISK=1 时, compact_ 数据写入磁盘, 通过 CSRCache 按需加载
+    const char* csr_on_disk_env = std::getenv("CSR_ON_DISK");
+    if (csr_on_disk_env && std::atoi(csr_on_disk_env) == 1) {
+        const char* cache_mb_env = std::getenv("CSR_CACHE_MB");
+        size_t cache_bytes = cache_mb_env ? (size_t)std::atoi(cache_mb_env) * 1024 * 1024 : 256 * 1024 * 1024;
+
+        std::cout << "  [CSR] Writing compact data to disk (CSR_ON_DISK=1)..." << std::endl;
+        csr_cache_ = std::make_unique<CSRCache>(
+            adj_csr_compact_, adj_csr_byte_offsets_, cache_bytes);
+
+        // 释放内存中的 compact 数据
+        size_t freed_mb = adj_csr_compact_.size() / (1024.0 * 1024);
+        adj_csr_compact_.clear();
+        adj_csr_compact_.shrink_to_fit();
+        csr_on_disk_ = true;
+
+        std::cout << "  [CSR] Disk mode: freed " << freed_mb << "MB, byte_offsets ("
+                  << offset_mb << "MB) remain in memory" << std::endl;
+    }
 }
 
 // 解码单个节点的压缩 CSR 邻居列表到 csr_decode_buf_
@@ -2593,9 +2614,21 @@ uint32_t DiskHNSW::decodeCsrNeighbors(uint32_t new_id) {
     uint32_t byte_start = adj_csr_byte_offsets_[new_id];
     uint32_t byte_end = adj_csr_byte_offsets_[new_id + 1];
     size_t available = byte_end - byte_start;
-    const uint8_t* p = adj_csr_compact_.data() + byte_start;
 
     csr_decode_buf_.clear();
+    if (available == 0) return 0;
+
+    const uint8_t* p;
+    // P3: CSR 上磁盘时, 从 CSRCache 获取字节
+    if (csr_on_disk_ && csr_cache_) {
+        auto bytes = csr_cache_->getNodeBytes(new_id);
+        if (!bytes.data || bytes.length == 0) return 0;
+        p = bytes.data;
+        available = bytes.length;
+    } else {
+        p = adj_csr_compact_.data() + byte_start;
+    }
+
     uint32_t prev = 0;
     while (available > 0) {
         uint32_t delta;

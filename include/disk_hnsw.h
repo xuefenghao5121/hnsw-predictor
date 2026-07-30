@@ -18,6 +18,7 @@
 #include "replacement_policy.h"
 #include "graph_prefetcher.h"
 #include "io_uring_wrapper.h"
+#include "csr_cache.h"
 
 #include <vector>
 #include <string>
@@ -150,6 +151,9 @@ public:
     // 重置缓存统计
     void resetCacheStats() { cache_->resetStats(); }
 
+    // P3: CSRCache 访问
+    CSRCache* getCSRCache() { return csr_cache_.get(); }
+
     // 释放 blocks 文件的 page cache (每次查询后调用)
     void dropPageCache() { cache_->dropPageCache(); }
 
@@ -237,6 +241,12 @@ private:
     std::vector<uint8_t> adj_csr_compact_;        // 压缩字节流
     std::vector<uint32_t> adj_csr_byte_offsets_;   // 字节偏移 (N+1)
     bool csr_compressed_ = false;
+
+    // ---- P3: CSR 分页缓存 (磁盘驻留) ----
+    // 当 CSR_ON_DISK=1 时, compact_ 数据写入磁盘文件,
+    // 通过 CSRCache 按需分页加载. byte_offsets_ 常驻内存.
+    std::unique_ptr<CSRCache> csr_cache_;
+    bool csr_on_disk_ = false;
 
     // 解码 buffer (thread_local, 避免频繁分配)
     // getInMemNeighbors 解码到这里, 返回指针
