@@ -1,0 +1,8 @@
+project: DiskHNSW
+id-prefixes: [OBS]
+layers: {L0: intent, L1: contract, L2: mechanism, L3: executable}
+source: observed
+description: |
+  DiskHNSW — 内存受限环境下的磁盘向量搜索系统。
+  从 C++ 源码、Python 脚本、Shell pipeline 和测试代码中机械提取的规范性描述。
+  source=observed 表示条款直接源自代码实体，非从设计文档推断。
