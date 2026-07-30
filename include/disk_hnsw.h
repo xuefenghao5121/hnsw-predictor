@@ -215,6 +215,9 @@ public:
     void buildPqDistTable(const float* query);
 
 private:
+    // P3 (DEC-039): 驱逐初始化文件的 page cache
+    void evictInitFileCache(const std::string& path);
+
     // ---- 图数据（常驻内存，old_id空间）----
     GraphStructure graph_;
     uint32_t dim_;

@@ -1,7 +1,10 @@
 # DiskHNSW - 内存受限环境下的磁盘向量搜索
 
-> **SIFT1M**: 512MB cgroup, 95.70% recall / 5800+ QPS (4T), hnswlib 需 726MB OOM
-> **DEEP10M**: 2GB cgroup, 95.15% recall / 2340 QPS (12T), hnswlib 需 ~6GB OOM
+> **SIFT1M**: 512MB cgroup, 95.70% recall / 5800+ QPS (4T) ⚠️ 待诚实重测
+> **DEEP10M**: 2GB cgroup, 95.15% recall / **1762 QPS** (12T, drop_caches 诚实测量)
+>
+> ⚠️ **之前的 QPS 数字 (SIFT1M 5800, DEEP10M 2340) 在 30GB RAM 开发机上测量, page cache 白嫖了 8GB+ 数据** (DEC-039)
+> 诚实测量 (drop_caches + cgroup) 后, DEEP10M 2GB cgroup QPS 从 2340 降到 1762 (-25%), 1.5GB 从 1895 降到 327 (-83%)
 
 ## 项目背景
 
@@ -45,13 +48,25 @@ RSS: 337MB → ... → 301MB → 269MB   (CSR 压缩后↓ 32MB)
 
 ### P2: DEEP10M 规模验证 (10M 向量)
 
-| 指标 | hnswlib(全内存) | DiskHNSW(2GB cgroup) |
-|------|-----------------|---------------------|
-| Recall | 95.60% (ef=400) | **95.15%** (EF=300) |
-| QPS (1T) | 1557 | 590 |
-| QPS (12T) | - | **2340** |
-| RSS | ~6GB (OOM@2GB) | **1612MB** |
-| 内存节省 | - | **3.7x** |
+| 指标 | hnswlib(全内存) | DiskHNSW(2GB cgroup, 诚实) | DiskHNSW(之前不诚实) |
+|------|-----------------|---------------------------|---------------------|
+| Recall | 95.60% (ef=400) | **95.15%** (EF=300) | 95.15% |
+| QPS (12T) | OOM@2GB | **1762** | ~~2340~~ |
+| RSS | ~6GB | **1401MB** | 1612MB |
+| 内存节省 | - | **4.3x** | ~~3.7x~~ |
+
+> ⚠️ DEC-039: 之前数字在 30GB RAM 机器上测量, page cache 白嫖了 8GB+ 数据文件。
+> 诚实测量 (drop_caches + posix_fadvise(DONTNEED)) 后 QPS 降 25%。
+> 1.5GB cgroup 下从 1895 降到 327 (降 83%)。
+
+#### 诚实 cgroup 扫描 (DEEP10M, drop_caches)
+
+| cgroup | Recall | QPS (12T) | RSS peak | 备注 |
+|--------|--------|-----------|---------|------|
+| 2GB | 95.15% | 1762 | 1401 MB | page cache ~900MB 可用 |
+| 1.5GB | 95.15% | 327 | 1107 MB | page cache ~400MB, 性能悬壁 |
+| 1.2GB | 95.15% | 252 | 1108 MB | page cache ~100MB |
+| 1.1GB | OOM | - | - | 核心数据 > 1.1GB |
 
 > P2 关键发现：10M 规模瓶颈从 I/O 转移到 PQ 计算(80%)。VisitedList uint32->uint8
 > 消除内存分配瓶颈，带来 2x QPS 提升。io_uring fine rerank 在候选数>200 时丢结果，

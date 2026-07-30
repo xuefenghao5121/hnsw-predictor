@@ -78,6 +78,12 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
     // ---- 构建 BFS-remapped CSR 邻接表 (常驻内存, 用于 multi-hop 预取) ----
     buildInMemoryAdjacency();
 
+    // P3 (DEC-039): 驱逐初始化文件的 page cache
+    // graph.bin (4.6GB), bfs.bin (76MB) 加载完毕, 文件页不再需要
+    // 释放 page cache 额度给运行时热数据 (vecblocks/CSR pages)
+    evictInitFileCache(graph_path);
+    evictInitFileCache(bfs_path);
+
     // ---- 3. 初始化BlockCache ----
     std::cout << "[DiskHNSW] Initializing BlockCache..." << std::endl;
     cache_ = std::make_unique<BlockCache>(blocks_path, route_path, cache_slots, dim_);
@@ -133,6 +139,11 @@ DiskHNSW::DiskHNSW(const std::string& graph_path,
     
     // ---- 构建 BFS-remapped CSR 邻接表 (常驻内存, 用于 multi-hop 预取) ----
     buildInMemoryAdjacency();
+
+    // P3 (DEC-039): 驱逐初始化文件的 page cache
+    evictInitFileCache(graph_path);
+    evictInitFileCache(bfs_path);
+
     std::cout << "[DiskHNSW] BlockCache (pluggable) initialized" << std::endl;
     cache_slots_ = cache_->getCacheSlots();
 }
@@ -149,6 +160,16 @@ float DiskHNSW::l2Distance(const float* a, const float* b) const {
         result += t * t;
     }
     return result;
+}
+
+// P3 (DEC-039): 驱逐初始化文件的 page cache
+// 加载完 graph/bfs/pq 后, 文件页不再需要, 释放给运行时热数据
+void DiskHNSW::evictInitFileCache(const std::string& path) {
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd >= 0) {
+        posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+        close(fd);
+    }
 }
 
 // ============================================================
@@ -224,6 +245,14 @@ void DiskHNSW::loadPQCodes(const std::string& pq_path) {
     }
 
     pq_enabled_ = true;
+
+    // P3: 驱逐 PQ codes 文件的 page cache (已加载到进程内存, 文件页不再需要)
+    // 释放 cgroup page cache 额度给运行时热数据 (vecblocks/CSR)
+    int pq_fd = open(pq_path.c_str(), O_RDONLY);
+    if (pq_fd >= 0) {
+        posix_fadvise(pq_fd, 0, 0, POSIX_FADV_DONTNEED);
+        close(pq_fd);
+    }
 
     size_t codebook_mb = codebook_size * sizeof(float) / (1024 * 1024);
     size_t codes_mb = n * M / (1024 * 1024);
@@ -2121,14 +2150,19 @@ DiskHNSW::batchSearch(const std::vector<float>& queries, size_t k, size_t batch_
 bool DiskHNSW::buildFineRerank(const std::string& blocks_path, uint32_t num_nodes) {
     // 懒构建: node→slot 表 + block→data_offset 表 + 4KB io_uring
     // FINE_BUFFERED=1 时用 buffered I/O 吃 page cache (热区页零 I/O)
+    // 默认仍用 buffered, cgroup MemoryMax 会限制 page cache 总量
     static const bool kFineBuffered = std::getenv("FINE_BUFFERED") && std::atoi(std::getenv("FINE_BUFFERED")) != 0;
+    // FINE_DIRECT=1 强制 O_DIRECT (诊断用, 绕过 page cache)
+    static const bool kFineDirect = std::getenv("FINE_DIRECT") && std::atoi(std::getenv("FINE_DIRECT")) != 0;
     int fd = -1;
-    if (kFineBuffered) {
+    if (kFineBuffered && !kFineDirect) {
         fd = open(blocks_path.c_str(), O_RDONLY);
-        std::cerr << "[FineRerank] buffered mode (page cache)" << std::endl;
+        std::cerr << "[FineRerank] buffered mode (page cache, cgroup-limited)" << std::endl;
+    } else {
+        fd = open(blocks_path.c_str(), O_RDONLY | O_DIRECT);
+        std::cerr << "[FineRerank] O_DIRECT mode (no page cache)" << std::endl;
     }
-    if (fd < 0) fd = open(blocks_path.c_str(), O_RDONLY | O_DIRECT);
-    if (fd < 0) fd = open(blocks_path.c_str(), O_RDONLY);  // fallback buffered
+    if (fd < 0) fd = open(blocks_path.c_str(), O_RDONLY);  // fallback
     if (fd < 0) {
         std::cerr << "[FineRerank] open failed: " << blocks_path << std::endl;
         return false;
